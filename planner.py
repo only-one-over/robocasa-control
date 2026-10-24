@@ -75,6 +75,31 @@ class RobotModel:
         self.set_q(q)
         return self.fk()
 
+    def within_limits(self, q: np.ndarray, margin: float = 0.15) -> bool:
+        """True when every joint keeps a safety margin from its bounds."""
+        q = np.asarray(q, dtype=float)
+        return bool(np.all(q >= self.lower + margin) and np.all(q <= self.upper - margin))
+
+    def ik_multi(self, target_pos, target_rot=None, tries: int = 12, margin: float = 0.15,
+                 seed: int = 0, **kwargs) -> tuple[np.ndarray | None, dict]:
+        """Multi-start IK that only accepts solutions away from joint limits."""
+        rng = np.random.default_rng(seed)
+        seeds = [self.get_q()]
+        low = self.lower + margin
+        high = self.upper - margin
+        for _ in range(max(0, tries - 1)):
+            seeds.append(rng.uniform(low, high))
+        last = {}
+        for index, q_init in enumerate(seeds):
+            q, info = self.ik(target_pos, target_rot=target_rot, q_init=q_init, **kwargs)
+            last = info
+            if q is None:
+                continue
+            if not self.within_limits(q, margin):
+                continue
+            return q, {**info, "seed_index": index, "within_limits": True}
+        return None, {**last, "within_limits": False, "error": "no solution away from joint limits"}
+
     def jacobian(self) -> np.ndarray:
         jacp = np.zeros((3, self.nv))
         jacr = np.zeros((3, self.nv))
@@ -85,6 +110,13 @@ class RobotModel:
            tol_pos: float = 2e-3, tol_rot: float = 0.03, damping: float = 0.08,
            max_step: float = 0.4) -> tuple[np.ndarray | None, dict]:
         """Damped least squares IK; returns the solution and diagnostics."""
+        self.save()
+        try:
+            return self._ik_inner(target_pos, target_rot, q_init, iters, tol_pos, tol_rot, damping, max_step)
+        finally:
+            self.restore()
+
+    def _ik_inner(self, target_pos, target_rot, q_init, iters, tol_pos, tol_rot, damping, max_step):
         q = (self.get_q() if q_init is None else np.array(q_init, dtype=float)).copy()
         q = np.clip(q, self.lower, self.upper)
         target_pos = np.asarray(target_pos, dtype=float)
@@ -205,6 +237,13 @@ class Planner:
 
     def plan(self, q_start, q_goal, max_iters: int = 3000, step: float = 0.12,
              check_step: float = 0.06) -> tuple[list[np.ndarray] | None, dict]:
+        self.robot.save()
+        try:
+            return self._plan_inner(q_start, q_goal, max_iters, step, check_step)
+        finally:
+            self.robot.restore()
+
+    def _plan_inner(self, q_start, q_goal, max_iters, step, check_step):
         t0 = time.time()
         q_start = np.asarray(q_start, dtype=float)
         q_goal = np.asarray(q_goal, dtype=float)
@@ -222,6 +261,9 @@ class Planner:
 
         tree_a = [(q_start, -1)]
         tree_b = [(q_goal, -1)]
+        # The trees swap every iteration, so remember which one is rooted at
+        # the start: the joined path comes out end-to-start otherwise.
+        a_is_start = True
         lower, upper = self.robot.lower, self.robot.upper
 
         for iteration in range(max_iters):
@@ -232,6 +274,8 @@ class Planner:
                 reached = self._connect(tree_b, q_new, step, check_step)
                 if reached is not None:
                     path = self._join(tree_a, idx_a, tree_b, reached)
+                    if not a_is_start:
+                        path.reverse()
                     path = self._shortcut(path, check_step)
                     return path, {
                         "nodes": len(path), "iters": iteration + 1,
@@ -240,6 +284,7 @@ class Planner:
                         "tree_a": len(tree_a), "tree_b": len(tree_b),
                     }
             tree_a, tree_b = tree_b, tree_a
+            a_is_start = not a_is_start
             info["iters"] = iteration + 1
 
         return None, {**info, "error": "no path", "checks": self.checker.checks,
