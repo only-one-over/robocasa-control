@@ -29,7 +29,9 @@ from planner import CollisionChecker, Planner, RobotModel, time_parameterise
 # the JSON-RPC channel. Keep a private handle on the real stdout for protocol
 # frames, then point fd 1 at stderr so every library print becomes diagnostics.
 
-PREVIEW_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "preview.png")
+PREVIEW_PATH = os.environ.get("ROBOCASA_PREVIEW_PATH") or os.path.join(
+    os.path.dirname(os.path.abspath(__file__)), "preview.png"
+)
 
 
 _PROTO_FD = os.dup(1)

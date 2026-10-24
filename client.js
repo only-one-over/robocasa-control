@@ -4,6 +4,71 @@ window.__ModuleLoader__.load({
     const React = require('react')
     const h = React.createElement
 
+    // UI strings follow the browser language; the plugin itself does not depend
+    // on the host's locale service, so this stays self-contained.
+    const LANG = (typeof navigator !== 'undefined' && navigator.language ? navigator.language : 'en').toLowerCase()
+    const ZH = LANG.startsWith('zh')
+    const TEXT = {
+      zh: {
+        title: t('title'),
+        noScene: t('noScene'),
+        reading: t('reading'),
+        openHint: t('openHint'),
+        settings: t('settings'),
+        resolution: '画面分辨率',
+        camera: '默认相机',
+        threshold: '检测阈值',
+        previewEvery: '预览刷新',
+        settingsHint: t('settingsHint'),
+        workers: t('workers'),
+        noWorkers: t('noWorkers'),
+        current: '当前',
+        orphan: '孤儿',
+        close: t('close'),
+        expand: t('expand'),
+        viewSettings: t('viewSettings'),
+        floatLabel: t('floatLabel'),
+        thirdPerson: '第三人称',
+        shoulder: '肩载',
+        azimuth: (v) => t('azimuth', v),
+        elevation: (v) => t('elevation', v),
+        distance: (v) => t('distance', v),
+        everySteps: (v) => t('everySteps', v),
+        busy: '正在执行',
+      },
+      en: {
+        title: 'RoboCasa simulation',
+        noScene: 'no scene open',
+        reading: 'reading state…',
+        openHint: 'open a scene to see its state here',
+        settings: 'Settings',
+        resolution: 'Stream resolution',
+        camera: 'Default camera',
+        threshold: 'Detector threshold',
+        previewEvery: 'Preview interval',
+        settingsHint: 'the camera applies on the next open; everything else applies immediately',
+        workers: 'Running simulations',
+        noWorkers: 'no worker process is running',
+        current: 'current',
+        orphan: 'orphan',
+        close: 'Close',
+        expand: 'Open the RoboCasa preview',
+        viewSettings: 'View settings',
+        floatLabel: 'RoboCasa floating preview',
+        thirdPerson: 'Third person',
+        shoulder: 'Shoulder',
+        azimuth: (v) => `Azimuth ${v}°`,
+        elevation: (v) => `Elevation ${v}°`,
+        distance: (v) => `Distance ${v}m`,
+        everySteps: (v) => `every ${v} steps`,
+        busy: 'Running',
+      },
+    }
+    const t = (key, ...args) => {
+      const value = (TEXT[ZH ? 'zh' : 'en'] || TEXT.en)[key] ?? key
+      return typeof value === 'function' ? value(...args) : value
+    }
+
     const MONO = 'ui-monospace, SFMono-Regular, Menlo, monospace'
     const BORDER = '1px solid rgba(128, 128, 128, 0.35)'
     const CAMERAS = [
@@ -188,10 +253,10 @@ window.__ModuleLoader__.load({
         ? h(
             'div',
             { style: { display: 'flex', flexDirection: 'column', gap: 8, marginTop: 6 } },
-            h('div', { style: { fontSize: 12, opacity: 0.6, letterSpacing: '0.04em' } }, '设置'),
+            h('div', { style: { fontSize: 12, opacity: 0.6, letterSpacing: '0.04em' } }, t('settings')),
             h(
               Field,
-              { label: '画面分辨率' },
+              { label: t('resolution') },
               h(Select, {
                 value: `${width}x${height}`,
                 options: RESOLUTIONS.map(([w, hh]) => [`${w}x${hh}`, `${w}×${hh}`]),
@@ -203,7 +268,7 @@ window.__ModuleLoader__.load({
             ),
             h(
               Field,
-              { label: '默认相机' },
+              { label: t('camera') },
               h(Select, {
                 value: settings.camera,
                 options: CAMERAS.map((name) => [name, name.replace('robot0_', '')]),
@@ -212,7 +277,7 @@ window.__ModuleLoader__.load({
             ),
             h(
               Field,
-              { label: '检测阈值' },
+              { label: t('threshold') },
               h(Select, {
                 value: settings.detectorThreshold,
                 options: [0.05, 0.1, 0.15, 0.2, 0.3, 0.5].map((v) => [v, v.toFixed(2)]),
@@ -221,17 +286,17 @@ window.__ModuleLoader__.load({
             ),
             h(
               Field,
-              { label: '预览刷新' },
+              { label: t('previewEvery') },
               h(Select, {
                 value: settings.previewEvery,
-                options: [1, 2, 4, 8].map((v) => [v, `每 ${v} 步`]),
+                options: [1, 2, 4, 8].map((v) => [v, t('everySteps', v)]),
                 onChange: (value) => patchSettings({ previewEvery: Number(value) }),
               }),
             ),
             h(
               'div',
               { style: { fontSize: 11, opacity: 0.55, fontFamily: MONO } },
-              '默认相机在下次打开场景时生效，其余立即生效',
+              t('settingsHint'),
             ),
           )
         : null
@@ -253,11 +318,11 @@ window.__ModuleLoader__.load({
         h(
           'div',
           { style: { display: 'flex', alignItems: 'baseline', gap: 10, flexWrap: 'wrap' } },
-          h('strong', { style: { fontSize: 14 } }, 'RoboCasa 仿真'),
+          h('strong', { style: { fontSize: 14 } }, t('title')),
           h(
             'span',
             { style: { fontSize: 12, opacity: 0.7, fontFamily: MONO } },
-            open ? `${state.task} · seed ${state.seed}` : '未打开场景',
+            open ? `${state.task} · seed ${state.seed}` : t('noScene'),
           ),
         ),
 
@@ -276,7 +341,7 @@ window.__ModuleLoader__.load({
           : h(
               'div',
               { style: { fontSize: 12, opacity: 0.7, fontFamily: MONO } },
-              state ? '打开一个场景后这里会显示状态' : '读取状态中…',
+              state ? t('openHint') : t('reading'),
             ),
 
         error ? h('div', { style: { fontSize: 12, color: '#d9534f' } }, error) : null,
@@ -284,9 +349,9 @@ window.__ModuleLoader__.load({
         h(
           'div',
           { style: { display: 'flex', flexDirection: 'column', gap: 6, marginTop: 4 } },
-          h('div', { style: { fontSize: 12, opacity: 0.6, letterSpacing: '0.04em' } }, '运行中的仿真'),
+          h('div', { style: { fontSize: 12, opacity: 0.6, letterSpacing: '0.04em' } }, t('workers')),
           workers.length === 0
-            ? h('div', { style: { fontSize: 12, opacity: 0.6, fontFamily: MONO } }, '没有运行中的 worker 进程')
+            ? h('div', { style: { fontSize: 12, opacity: 0.6, fontFamily: MONO } }, t('noWorkers'))
             : workers.map((item) =>
                 h(
                   'div',
@@ -308,8 +373,8 @@ window.__ModuleLoader__.load({
                   h('span', { style: { minWidth: 70 } }, `PID ${item.pid}`),
                   h('span', { style: { minWidth: 64, opacity: 0.75 } }, `${item.ageSec}s`),
                   h('span', { style: { minWidth: 64, opacity: 0.75 } }, `${item.rssMb} MB`),
-                  h('span', { style: { flex: 1, opacity: 0.55 } }, item.owned ? '当前' : '孤儿'),
-                  h(Button, { onClick: () => closeWorker(item.pid) }, '关闭'),
+                  h('span', { style: { flex: 1, opacity: 0.55 } }, item.owned ? t('current') : t('orphan')),
+                  h(Button, { onClick: () => closeWorker(item.pid) }, t('close')),
                 ),
               ),
         ),
@@ -425,7 +490,7 @@ window.__ModuleLoader__.load({
             'button',
             {
               type: 'button',
-              title: '打开 RoboCasa 预览',
+              title: t('expand'),
               onClick: () => setExpanded(true),
               style: { background: 'transparent', border: 0, color: 'inherit', cursor: 'pointer', padding: 6 },
             },
@@ -457,7 +522,7 @@ window.__ModuleLoader__.load({
               touchAction: 'none',
             },
           },
-          h('span', null, open ? `${state.task.replace('PickPlace', '')} · s${state.seed}` : '未打开场景'),
+          h('span', null, open ? `${state.task.replace('PickPlace', '')} · s${state.seed}` : t('noScene')),
           h(
             'button',
             {
@@ -495,7 +560,7 @@ window.__ModuleLoader__.load({
                   opacity: 0.7,
                 },
               },
-              '未打开场景',
+              t('noScene'),
             ),
         h(
           'div',
@@ -511,14 +576,14 @@ window.__ModuleLoader__.load({
               opacity: 0.85,
             },
           },
-          h('span', null, open ? `step ${state.steps} · ${state.success ? 'success' : 'running'}` : '未打开场景'),
+          h('span', null, open ? `step ${state.steps} · ${state.success ? 'success' : 'running'}` : t('noScene')),
           settings
             ? h(
                 'button',
                 {
                   type: 'button',
                   onClick: () => setShowControls((value) => !value),
-                  title: '视角设置',
+                  title: t('viewSettings'),
                   style: {
                     background: 'transparent',
                     border: 0,
@@ -548,22 +613,22 @@ window.__ModuleLoader__.load({
               },
               h(Select, {
                 value: settings.viewMode,
-                options: [['third_person', '第三人称'], ['shoulder', '肩载']],
+                options: [['third_person', t('thirdPerson')], ['shoulder', t('shoulder')]],
                 onChange: (value) => patchSettings({ viewMode: value }),
               }),
               h(Select, {
                 value: settings.azimuth,
-                options: [0, 45, 90, 135, 180, 225, 270, 315].map((v) => [v, `方位 ${v}°`]),
+                options: [0, 45, 90, 135, 180, 225, 270, 315].map((v) => [v, t('azimuth', v)]),
                 onChange: (value) => patchSettings({ azimuth: Number(value) }),
               }),
               h(Select, {
                 value: settings.elevation,
-                options: [-15, -25, -32, -45, -62].map((v) => [v, `俯角 ${v}°`]),
+                options: [-15, -25, -32, -45, -62].map((v) => [v, t('elevation', v)]),
                 onChange: (value) => patchSettings({ elevation: Number(value) }),
               }),
               h(Select, {
                 value: settings.distance,
-                options: [1.8, 2.2, 2.8, 3.6, 4.5].map((v) => [v, `距离 ${v}m`]),
+                options: [1.8, 2.2, 2.8, 3.6, 4.5].map((v) => [v, t('distance', v)]),
                 onChange: (value) => patchSettings({ distance: Number(value) }),
               }),
             )
@@ -585,7 +650,7 @@ window.__ModuleLoader__.load({
         )
         ctx.slots.inject('shell.overlay', () =>
           ctx.slots.register(
-            { name: 'shell.overlay', id: 'robocasa-float', order: 10, label: 'RoboCasa 悬浮预览' },
+            { name: 'shell.overlay', id: 'robocasa-float', order: 10, label: t('floatLabel') },
             RoboCasaFloat,
           ),
         )

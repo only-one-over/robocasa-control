@@ -1,6 +1,6 @@
 {
   "name": "@local/robocasa-control",
-  "version": "0.23.0",
+  "version": "0.24.0",
   "private": true,
   "type": "module",
   "description": "Control a RoboCasa kitchen simulation from chat.",
@@ -11,17 +11,18 @@
     "./icon": "./icon.svg"
   },
   "files": [
-    "client.js",
-    "cordis.patch.yml",
-    "doctor.py",
-    "icon.svg",
     "index.js",
-    "locale/*.json",
+    "client.js",
+    "worker.py",
     "planner.py",
-    "self_check.py",
-    "test_planner.py",
+    "doctor.py",
     "viewer.py",
-    "worker.py"
+    "self_check.py",
+    "cordis.patch.yml",
+    "locale/*.json",
+    "icon.svg",
+    "README.md",
+    "LICENSE"
   ],
   "dsh": {
     "bundle": {
@@ -31,5 +32,12 @@
       "platform": "web",
       "immediately": true
     }
+  },
+  "engines": {
+    "dsh": ">=0.1.0"
+  },
+  "scripts": {
+    "check": "node --check index.js && node --check client.js",
+    "test": "python3 self_check.py"
   }
 }

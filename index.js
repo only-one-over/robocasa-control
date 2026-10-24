@@ -6,9 +6,10 @@
  * the worker's stdin/stdout, so physics state survives between tool calls.
  */
 
-import { spawn } from 'node:child_process'
+import { execFile, spawn } from 'node:child_process'
 import { existsSync, mkdirSync, readdirSync, readFileSync, statSync, writeFileSync } from 'node:fs'
 import { access, constants } from 'node:fs/promises'
+import { homedir } from 'node:os'
 import { basename, dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
@@ -16,11 +17,13 @@ export const name = 'robocasa-control'
 export const inject = ['tools', 'webServer']
 
 const HERE = dirname(fileURLToPath(import.meta.url))
-const DEFAULT_PYTHON = '/home/zhu/miniconda3/envs/robocasa/bin/python'
-
 const DEFAULT_TASK = 'PickPlaceCounterToCabinet'
 
-const SETTINGS_PATH = join(HERE, 'settings.json')
+/** Where runtime state lives: never inside the package, which may be read-only. */
+const dataDirFor = (config) => config.dataDir || join(homedir(), '.dsh', 'robocasa-control')
+const DEFAULT_SETTINGS_PATH = () => join(dataDirFor({}), 'settings.json')
+const settingsPathFor = (config) => join(dataDirFor(config), 'settings.json')
+const previewPathFor = (config) => join(dataDirFor(config), 'preview.png')
 const DEFAULT_SETTINGS = {
   camera: 'robot0_agentview_left',
   detectorThreshold: 0.15,
@@ -33,18 +36,19 @@ const DEFAULT_SETTINGS = {
   distance: 2.8,
 }
 
-const readSettings = () => {
+const readSettings = (path = DEFAULT_SETTINGS_PATH()) => {
   try {
-    return { ...DEFAULT_SETTINGS, ...JSON.parse(readFileSync(SETTINGS_PATH, 'utf8')) }
+    return { ...DEFAULT_SETTINGS, ...JSON.parse(readFileSync(path, 'utf8')) }
   } catch {
     return { ...DEFAULT_SETTINGS }
   }
 }
 
-const writeSettings = (patch) => {
-  const next = { ...readSettings(), ...patch }
+const writeSettings = (patch, path = DEFAULT_SETTINGS_PATH()) => {
+  const next = { ...readSettings(path), ...patch }
   try {
-    writeFileSync(SETTINGS_PATH, JSON.stringify(next, null, 2))
+    mkdirSync(dirname(path), { recursive: true })
+    writeFileSync(path, JSON.stringify(next, null, 2))
   } catch {}
   return next
 }
@@ -59,10 +63,66 @@ const PLUGIN_VERSION = (() => {
 
 
 /** First existing executable among the configured path and known fallbacks. */
+const canImportRobocasa = (python) =>
+  new Promise((done) => {
+    try {
+      execFile(python, ['-c', 'import robocasa, robosuite'], { timeout: 30_000 }, (error) => done(!error))
+    } catch {
+      done(false)
+    }
+  })
+
+const condaRoots = () => {
+  const roots = new Set()
+  for (const dir of (process.env.PATH || '').split(':')) {
+    if (/condabin\/?$/.test(dir)) roots.add(dirname(dir))
+  }
+  for (const name of ['miniconda3', 'anaconda3', 'miniforge3', 'mambaforge']) {
+    roots.add(join(homedir(), name))
+  }
+  return [...roots]
+}
+
+/** Interpreter candidates, most specific first. */
+const pythonCandidates = (config) => {
+  const list = []
+  if (config.pythonPath) list.push(config.pythonPath)
+  if (process.env.ROBOCASA_PYTHON) list.push(process.env.ROBOCASA_PYTHON)
+  if (process.env.CONDA_PREFIX) list.push(join(process.env.CONDA_PREFIX, 'bin', 'python'))
+  if (process.env.VIRTUAL_ENV) list.push(join(process.env.VIRTUAL_ENV, 'bin', 'python'))
+  const envs = []
+  for (const root of condaRoots()) {
+    const envDir = join(root, 'envs')
+    let names = []
+    try {
+      names = readdirSync(envDir)
+    } catch {
+      continue
+    }
+    for (const name of names) envs.push({ name, python: join(envDir, name, 'bin', 'python') })
+  }
+  // Environments named after the simulation stack are the likely ones.
+  envs.sort((a, b) => Number(!/casa/i.test(a.name)) - Number(!/casa/i.test(b.name)))
+  list.push(...envs.map((entry) => entry.python))
+  list.push('/usr/bin/python3', 'python3')
+  return [...new Set(list)]
+}
+
+let pythonChoice = null
+
+/** Pick an interpreter that can actually import the simulation stack. */
 async function resolvePython(config) {
-  const configured = config.pythonPath || DEFAULT_PYTHON
-  if (await isExecutable(configured)) return configured
-  for (const candidate of [DEFAULT_PYTHON, '/usr/bin/python3', 'python3']) {
+  const cached = pythonChoice
+  if (cached && !config.pythonPath) return cached.value
+  const candidates = pythonCandidates(config)
+  for (const candidate of candidates) {
+    if (!(await isExecutable(candidate))) continue
+    if (await canImportRobocasa(candidate)) {
+      pythonChoice = { value: candidate }
+      return candidate
+    }
+  }
+  for (const candidate of candidates) {
     if (await isExecutable(candidate)) return candidate
   }
   return 'python3'
@@ -84,7 +144,11 @@ function runDoctor(pythonPath, deep, signal) {
   return new Promise((resolve, reject) => {
     const child = spawn(pythonPath, [script, ...(deep ? ['--deep'] : [])], {
       cwd: HERE,
-      env: { ...process.env, PYTHONUNBUFFERED: '1' },
+      env: {
+        ...process.env,
+        PYTHONUNBUFFERED: '1',
+        ROBOCASA_PREVIEW_PATH: previewPathFor(this.config || {}),
+      },
       stdio: ['ignore', 'pipe', 'pipe'],
     })
     let stdout = ''
@@ -121,9 +185,15 @@ function runDoctor(pythonPath, deep, signal) {
   })
 }
 
+const EXCLUSIVE_METHODS = new Set([
+  'open', 'move', 'rotate', 'act', 'grasp', 'drop', 'plan', 'reset', 'restart', 'close',
+])
+
 class SimWorker {
   constructor(config) {
-    this.pythonPath = config.pythonPath || DEFAULT_PYTHON
+    // Resolved asynchronously before the first spawn; null until then.
+    this.config = config
+    this.pythonPath = config.pythonPath || null
     this.workerScript = config.workerScript || join(HERE, 'worker.py')
     this.cwd = config.cwd || HERE
     this.child = null
@@ -135,6 +205,10 @@ class SimWorker {
     this.sceneOpen = false
     /** Last abnormal worker exit, kept until a later call succeeds. */
     this.crashed = null
+    /** Method currently holding the simulation, if any. */
+    this.busy = null
+    /** Last scene this plugin opened, so a crash can tell the user what to reopen. */
+    this.lastScene = null
   }
 
   /** Error text that carries the worker's own diagnostics. */
@@ -153,7 +227,9 @@ class SimWorker {
 
   #start() {
     if (this.child) return
-    const child = spawn(this.pythonPath, [this.workerScript], {
+    const python = this.pythonPath
+    if (!python) throw new Error('python interpreter not resolved; call resolvePython first')
+    const child = spawn(python, [this.workerScript], {
       cwd: this.cwd,
       env: { ...process.env, PYTHONUNBUFFERED: '1' },
       stdio: ['pipe', 'pipe', 'pipe'],
@@ -214,7 +290,32 @@ class SimWorker {
     this.pending.clear()
   }
 
-  call(method, params = {}, options = {}) {
+  /** Resolve the interpreter once, before the first spawn. */
+  async ensurePython() {
+    if (!this.pythonPath) this.pythonPath = await resolvePython(this.config)
+    return this.pythonPath
+  }
+
+  async call(method, params = {}, options = {}) {
+    const exclusive = EXCLUSIVE_METHODS.has(method)
+    if (exclusive && this.busy) {
+      const error = new Error(
+        `the simulation is busy with ${this.busy}; wait for it to finish or check robocasa_status`,
+      )
+      error.busy = true
+      throw error
+    }
+    const previous = this.busy
+    if (exclusive) this.busy = method
+    try {
+      return await this.#dispatch(method, params, options)
+    } finally {
+      this.busy = previous
+    }
+  }
+
+  async #dispatch(method, params = {}, options = {}) {
+    await this.ensurePython()
     this.#start()
     const id = ++this.seq
     const timeoutMs = options.timeoutMs ?? 120_000
@@ -318,8 +419,12 @@ function objectLines(objects) {
 
 /** Tools advertised to the model. Each entry maps 1:1 to a worker method. */
 export function apply(ctx, config = {}) {
+  const dataDir = dataDirFor(config)
+  try {
+    mkdirSync(dataDir, { recursive: true })
+  } catch {}
   const worker = new SimWorker(config)
-  const storageRoot = config.storageRoot || join(process.cwd(), 'robocasa-runs')
+  const storageRoot = config.storageRoot || join(dataDirFor(config), 'runs')
   let run = null
 
   const nowIso = () => new Date().toISOString()
@@ -395,6 +500,17 @@ export function apply(ctx, config = {}) {
   let disposed = false
   ctx.effect(() => () => { disposed = true })
 
+  /** Reject cross-site writes: a page on another origin must not drive the sim. */
+  const sameOrigin = (req) => {
+    const origin = req.headers.origin
+    if (!origin) return true
+    try {
+      return new URL(origin).host === req.headers.host
+    } catch {
+      return false
+    }
+  }
+
   const sendJson = (res, value, status = 200) => {
     const body = JSON.stringify(value)
     res.writeHead(status, {
@@ -422,7 +538,7 @@ export function apply(ctx, config = {}) {
 
     // The worker writes frames while it steps, so this route reads the file
     // instead of calling it: long tool calls no longer stall the stream.
-    const previewPath = join(HERE, 'preview.png')
+    const previewPath = previewPathFor(config)
     let lastMtime = 0
     let lastBytes = null
 
@@ -531,6 +647,15 @@ export function apply(ctx, config = {}) {
       return { ok: false, error: 'process not found' }
     }
     if (!cmd.includes(WORKER_MARK)) return { ok: false, error: 'not a robocasa worker' }
+    // Only children of this host belong to this plugin: a second DSH instance
+    // running the same plugin must not have its worker killed from here.
+    try {
+      const stat = readFileSync(`/proc/${pid}/stat`, 'utf8')
+      const ppid = Number(stat.slice(stat.lastIndexOf(')') + 2).split(' ')[1])
+      if (ppid !== process.pid) return { ok: false, error: 'not owned by this plugin instance' }
+    } catch {
+      return { ok: false, error: 'process not found' }
+    }
     if (pid === worker.pid) {
       worker.stop()
       return { ok: true, pid, owned: true }
@@ -562,8 +687,22 @@ export function apply(ctx, config = {}) {
       kind: 'exact',
       path: '/robocasa/state',
       handler: async (req, res) => {
+        if (worker.busy) {
+          sendJson(res, {
+            open: worker.sceneOpen,
+            busy: worker.busy,
+            lastScene: worker.lastScene,
+            crashed: worker.crashed ? String(worker.crashed.message ?? worker.crashed) : null,
+          })
+          return
+        }
         if (!worker.sceneOpen) {
-          sendJson(res, { open: false, preview: 'off' })
+          sendJson(res, {
+            open: false,
+            preview: readSettings(settingsPathFor(config)).viewMode || 'off',
+            lastScene: worker.lastScene,
+            crashed: worker.crashed ? String(worker.crashed.message ?? worker.crashed) : null,
+          })
           return
         }
         try {
@@ -584,6 +723,10 @@ export function apply(ctx, config = {}) {
       path: '/robocasa/workers',
       handler: async (req, res) => {
         if (req.method === 'POST') {
+          if (!sameOrigin(req)) {
+            sendJson(res, { ok: false, error: 'cross-origin request rejected' }, 403)
+            return
+          }
           let body = ''
           try {
             for await (const chunk of req) body += chunk
@@ -607,11 +750,15 @@ export function apply(ctx, config = {}) {
       path: '/robocasa/settings',
       handler: async (req, res) => {
         if (req.method === 'POST') {
+          if (!sameOrigin(req)) {
+            sendJson(res, { error: 'cross-origin request rejected' }, 403)
+            return
+          }
           let body = ''
           try {
             for await (const chunk of req) body += chunk
             const patch = body ? JSON.parse(body) : {}
-            const next = writeSettings(patch)
+            const next = writeSettings(patch, settingsPathFor(config))
             if (worker.sceneOpen) {
               await worker.call('configure', next, { timeoutMs: 10_000 }).catch(() => undefined)
               await worker.call('set_preview', {
@@ -627,7 +774,7 @@ export function apply(ctx, config = {}) {
           }
           return
         }
-        sendJson(res, readSettings())
+        sendJson(res, readSettings(settingsPathFor(config)))
       },
     }))
     disposers.push(web.register({
@@ -636,6 +783,10 @@ export function apply(ctx, config = {}) {
       handler: async (req, res) => {
         let body = ''
         try {
+          if (!sameOrigin(req)) {
+            sendJson(res, { error: 'cross-origin request rejected' }, 403)
+            return
+          }
           if (!worker.sceneOpen) {
             sendJson(res, { error: 'no simulation open' }, 409)
             return
@@ -763,7 +914,7 @@ export function apply(ctx, config = {}) {
     isConcurrencySafe: () => false,
     async execute(args, exec) {
       const dir = startRun(args)
-      const settings = readSettings()
+      const settings = readSettings(settingsPathFor(config))
       const result = await worker.call(
         'open',
         { ...args, shots_dir: join(dir, 'frames') },
@@ -771,6 +922,7 @@ export function apply(ctx, config = {}) {
       )
       const status = await worker.call('status', {}, { timeoutMs: 30_000, signal: exec.signal })
       worker.sceneOpen = true
+      worker.lastScene = { task: args.task ?? DEFAULT_TASK, seed: args.seed ?? 0 }
       await worker.call(
         'configure',
         {

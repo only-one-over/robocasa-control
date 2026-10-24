@@ -303,6 +303,32 @@ robocasa_look(free={"lookat": [0.3, -1.2, 1.0], "distance": 1.5})
 python test_planner.py
 ```
 
+### 安装与配置
+
+`cordis.patch.yml` 里没有绝对路径，所有设置都有默认值：
+
+| 项 | 默认行为 |
+|---|---|
+| Python 解释器 | 依次探测：配置值 → `ROBOCASA_PYTHON` → `CONDA_PREFIX` → `VIRTUAL_ENV` →
+  各 conda 环境（优先名字含 "casa" 的）→ `/usr/bin/python3`，每个都用 `import robocasa` 验证 |
+| 运行时目录 | `~/.dsh/robocasa-control/`（`settings.json`、`preview.png`） |
+| 运行产物 | `~/.dsh/robocasa-control/runs/` |
+
+需要覆盖时在 composition 里加 `config`：
+
+```yaml
+- insert:
+    - id: robocasa-control
+      name: '@local/robocasa-control'
+      config:
+        pythonPath: /path/to/envs/robocasa/bin/python
+        storageRoot: /path/to/runs
+        dataDir: /path/to/runtime
+```
+
+**静态配置**（pythonPath / storageRoot / dataDir）写在 patch 里；
+**运行时配置**（分辨率、相机、检测阈值、预览刷新、视角）在面板里改，存 `settings.json`。
+
 ### 分工：面板配置，浮窗显示
 
 - **主面板**（侧栏进入）：只做配置——设置项、运行中的仿真、状态。**不显示画面**。
