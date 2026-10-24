@@ -13,7 +13,7 @@ import { basename, dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 export const name = 'robocasa-control'
-export const inject = ['tools']
+export const inject = ['tools', 'webServer']
 
 const HERE = dirname(fileURLToPath(import.meta.url))
 const DEFAULT_PYTHON = '/home/zhu/miniconda3/envs/robocasa/bin/python'
@@ -351,6 +351,81 @@ export function apply(ctx, config = {}) {
     return dir
   }
   const disposers = []
+
+  const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms))
+
+  const sendJson = (res, value, status = 200) => {
+    const body = JSON.stringify(value)
+    res.writeHead(status, {
+      'Content-Type': 'application/json; charset=utf-8',
+      'Cache-Control': 'no-store',
+      'Content-Length': Buffer.byteLength(body),
+    })
+    res.end(body)
+  }
+
+  /** MJPEG stream: one frame per request cycle, no state kept between clients. */
+  const streamFrames = async (req, res) => {
+    res.writeHead(200, {
+      'Content-Type': 'multipart/x-mixed-replace; boundary=frame',
+      'Cache-Control': 'no-store, no-cache, must-revalidate',
+      Connection: 'close',
+    })
+    let closed = false
+    req.on('close', () => { closed = true })
+    while (!closed) {
+      let frame
+      try {
+        frame = await worker.call('frame', { width: 320, height: 240 }, { timeoutMs: 5000 })
+      } catch {
+        await sleep(500)
+        continue
+      }
+      const bytes = Buffer.from(frame.image_png_base64, 'base64')
+      res.write('--frame\r\nContent-Type: image/png\r\n')
+      res.write(`Content-Length: ${bytes.length}\r\n\r\n`)
+      res.write(bytes)
+      res.write('\r\n')
+      await sleep(120)
+    }
+    res.end()
+  }
+
+  const web = ctx.get('webServer')
+  if (web) {
+    disposers.push(web.register({
+      kind: 'exact',
+      path: '/robocasa/state',
+      handler: async (req, res) => {
+        try {
+          const value = await worker.call('state', {}, { timeoutMs: 10_000 })
+          sendJson(res, value)
+        } catch (error) {
+          sendJson(res, { open: false, error: String(error?.message ?? error) }, 200)
+        }
+      },
+    }))
+    disposers.push(web.register({
+      kind: 'exact',
+      path: '/robocasa/frame.mjpg',
+      handler: streamFrames,
+    }))
+    disposers.push(web.register({
+      kind: 'exact',
+      path: '/robocasa/preview',
+      handler: async (req, res) => {
+        let body = ''
+        try {
+          for await (const chunk of req) body += chunk
+          const payload = body ? JSON.parse(body) : {}
+          const value = await worker.call('set_preview', payload, { timeoutMs: 30_000 })
+          sendJson(res, value)
+        } catch (error) {
+          sendJson(res, { error: String(error?.message ?? error) }, 400)
+        }
+      },
+    }))
+  }
 
   const saveImage = async (base64, path) => {
     const attachments = ctx.get('attachments')

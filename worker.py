@@ -741,6 +741,25 @@ class Sim:
                        "gripper": "open", "max_steps": 50})
         return {"success": False, "attempts": attempts, "grasp": [float(v) for v in target], "object": verify}
 
+    def frame(self, p):
+        """One small frame for the UI stream, never written to disk."""
+        self._require_env()
+        free = self.preview_params if self.preview_mode == "third_person" else None
+        png = self._render(None, int(p.get("width", 320)), int(p.get("height", 240)), free=free)
+        return {
+            "image_png_base64": base64.b64encode(png).decode("ascii"),
+            "mode": self.preview_mode,
+        }
+
+    def state(self, p):
+        """Compact live state for the UI; safe to call when nothing is open."""
+        if self.env is None:
+            return {"open": False, "preview": self.preview_mode}
+        value = self.status(p)
+        value["open"] = True
+        value["preview"] = self.preview_mode
+        return value
+
     def status(self, p):
         env = self._require_env()
         return {
@@ -960,6 +979,8 @@ METHODS = {
     "locate": Sim.locate,
     "rotate": Sim.rotate,
     "status": Sim.status,
+    "frame": Sim.frame,
+    "state": Sim.state,
     "grasp": Sim.grasp,
     "close": Sim.close,
 }

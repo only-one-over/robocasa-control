@@ -196,6 +196,19 @@ robocasa_look(free={"lookat": [0.3, -1.2, 1.0], "distance": 1.5})
 
 **限制**：自由相机没有命名相机的内参矩阵，视觉检测（`backend="vision"`）目前只支持命名相机。
 
+## Web 面板（监控）
+
+插件自带一个 DSH 内置面板：侧栏图标 → 主区域显示「RoboCasa 仿真」。
+
+- **实时画面**：`GET /robocasa/frame.mjpg`（MJPEG，320×240，约 11 fps）
+- **实时状态**：`GET /robocasa/state`（每秒轮询）
+- **预览模式按钮**：`POST /robocasa/preview {"mode": "third_person"}`
+
+三条路由挂在 DSH 自己的 webServer 上，同源，不需要额外端口。
+
+**已知限制**：worker 是单线程的，长时间工具调用（例如一次抓取）期间帧流会停住，
+属于预期行为。
+
 ## 预览窗口
 
 `robocasa_preview` 控制外置预览窗口，**立即生效，不需要重新 open**：
