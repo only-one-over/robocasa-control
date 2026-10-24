@@ -832,10 +832,13 @@ export function apply(ctx, config = {}) {
     },
     output: {
       schema: { type: 'object', additionalProperties: true },
-      render: (_args, value) => [text([
-        `Preview mode: ${value.mode}`,
-        `framing: distance ${round(value.params.dist)} m, azimuth ${round(value.params.az)} deg, elevation ${round(value.params.el)} deg`,
-      ].join('\n'))],
+      render: (_args, value) => {
+        const lines = [`Preview mode: ${value.mode}`]
+        if (value.mode === 'third_person') {
+          lines.push(`framing: distance ${round(value.params.dist)} m, azimuth ${round(value.params.az)} deg, elevation ${round(value.params.el)} deg`)
+        }
+        return [text(lines.join('\n'))]
+      },
     },
     timeoutMs: 30_000,
     isConcurrencySafe: () => true,
