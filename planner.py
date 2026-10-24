@@ -46,6 +46,10 @@ class RobotModel:
 
         site = robot.eef_site_id
         self.eef_site = int(site[part]) if isinstance(site, dict) else int(site)
+        # The IK site and the observation's eef frame differ by a fixed rotation
+        # (90 deg about z for the Panda hand). Calibrate it once from a live
+        # observation so IK targets and observation-based checks agree.
+        self.frame_offset = np.eye(3)
         self.nv = self.model.nv
         self._saved = None
 
@@ -66,10 +70,23 @@ class RobotModel:
             mujoco.mj_forward(self.model, self.data)
 
     # ---- kinematics ------------------------------------------------------
-    def fk(self) -> tuple[np.ndarray, np.ndarray]:
+    def calibrate(self, observed_rot: np.ndarray) -> None:
+        """Record the rotation between the IK site frame and the observed eef frame."""
+        _, site_rot = self.fk_raw()
+        offset = site_rot.T @ np.asarray(observed_rot, dtype=float)
+        # Snap near-axis-aligned offsets so tiny numerical noise cannot drift.
+        offset = np.round(offset, 6)
+        self.frame_offset = offset
+
+    def fk_raw(self) -> tuple[np.ndarray, np.ndarray]:
         pos = self.data.site_xpos[self.eef_site].copy()
         rot = self.data.site_xmat[self.eef_site].reshape(3, 3).copy()
         return pos, rot
+
+    def fk(self) -> tuple[np.ndarray, np.ndarray]:
+        """End-effector pose in the frame the observations report."""
+        pos, rot = self.fk_raw()
+        return pos, rot @ self.frame_offset
 
     def fk_of(self, q: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
         self.set_q(q)
@@ -81,14 +98,22 @@ class RobotModel:
         return bool(np.all(q >= self.lower + margin) and np.all(q <= self.upper - margin))
 
     def ik_multi(self, target_pos, target_rot=None, tries: int = 12, margin: float = 0.15,
-                 seed: int = 0, **kwargs) -> tuple[np.ndarray | None, dict]:
-        """Multi-start IK that only accepts solutions away from joint limits."""
+                 seed: int = 0, collect: int = 5, **kwargs) -> tuple[np.ndarray | None, dict]:
+        """Multi-start IK that keeps solutions away from limits and near the start.
+
+        Several valid seeds usually give different branches (elbow up/down). The
+        one closest to the current configuration needs the least motion, which
+        matters when the arm is servo-driven: a far branch swings through a long
+        arc and may not settle within the step budget.
+        """
+        q_ref = self.get_q().copy()
         rng = np.random.default_rng(seed)
-        seeds = [self.get_q()]
         low = self.lower + margin
         high = self.upper - margin
+        seeds = [q_ref]
         for _ in range(max(0, tries - 1)):
             seeds.append(rng.uniform(low, high))
+        solutions = []
         last = {}
         for index, q_init in enumerate(seeds):
             q, info = self.ik(target_pos, target_rot=target_rot, q_init=q_init, **kwargs)
@@ -97,8 +122,16 @@ class RobotModel:
                 continue
             if not self.within_limits(q, margin):
                 continue
-            return q, {**info, "seed_index": index, "within_limits": True}
-        return None, {**last, "within_limits": False, "error": "no solution away from joint limits"}
+            solutions.append((float(np.linalg.norm(q - q_ref)), index, q, info))
+            if len(solutions) >= collect:
+                break
+        if not solutions:
+            return None, {**last, "within_limits": False,
+                          "error": "no solution away from joint limits"}
+        solutions.sort(key=lambda item: item[0])
+        dist, index, q, info = solutions[0]
+        return q, {**info, "seed_index": index, "within_limits": True,
+                   "joint_travel": round(dist, 3), "candidates": len(solutions)}
 
     def jacobian(self) -> np.ndarray:
         jacp = np.zeros((3, self.nv))
@@ -123,13 +156,13 @@ class RobotModel:
         best = (math.inf, q.copy(), math.inf, math.inf)
         for _ in range(iters):
             self.set_q(q)
-            pos, rot = self.fk()
+            pos, rot = self.fk_raw()
             err_pos = target_pos - pos
             if target_rot is None:
                 err_rot = 0.0
                 err_vec = err_pos
             else:
-                err_mat = np.asarray(target_rot, dtype=float) @ rot.T
+                err_mat = np.asarray(target_rot, dtype=float) @ self.frame_offset.T @ rot.T
                 err_vec_rot = _rotvec(err_mat)
                 err_rot = float(np.linalg.norm(err_vec_rot))
                 err_vec = np.concatenate([err_pos, err_vec_rot])

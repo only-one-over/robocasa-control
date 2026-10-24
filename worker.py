@@ -23,6 +23,8 @@ import traceback
 
 import numpy as np
 
+from planner import CollisionChecker, Planner, RobotModel, time_parameterise
+
 # RoboCasa/robosuite print banners to stdout at import time, which would corrupt
 # the JSON-RPC channel. Keep a private handle on the real stdout for protocol
 # frames, then point fd 1 at stderr so every library print becomes diagnostics.
@@ -33,6 +35,42 @@ PREVIEW_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "preview
 _PROTO_FD = os.dup(1)
 os.dup2(2, 1)
 PROTO = os.fdopen(_PROTO_FD, "w", buffering=1, encoding="utf-8")
+
+
+ARM_KP = 400.0
+
+
+def _joint_controller_config():
+    """Composite config whose right arm takes absolute joint positions."""
+    from robosuite.controllers import load_composite_controller_config, load_part_controller_config
+
+    cfg = load_composite_controller_config(controller=None, robot="PandaOmron")
+    part = load_part_controller_config(default_controller="JOINT_POSITION")
+    part.update({"gripper": {"type": "GRIP"}, "input_type": "absolute", "kp": ARM_KP})
+    cfg["body_parts"]["right"] = part
+    return cfg
+
+
+def make_env(task, camera, width, height, seed, layout_and_style_ids=None):
+    """create_env with the arm switched to absolute joint position control."""
+    import robocasa.utils.env_utils as env_utils
+
+    cfg = _joint_controller_config()
+    original = env_utils.load_composite_controller_config
+    env_utils.load_composite_controller_config = lambda controller=None, robot=None: cfg
+    try:
+        env = env_utils.create_env(
+            task,
+            camera_names=[camera],
+            camera_widths=width,
+            camera_heights=height,
+            seed=seed,
+            render_onscreen=False,
+            layout_and_style_ids=layout_and_style_ids,
+        )
+    finally:
+        env_utils.load_composite_controller_config = original
+    return env
 
 
 def log(msg: str) -> None:
@@ -109,6 +147,13 @@ class Sim:
     def _base_action(self) -> np.ndarray:
         env = self._require_env()
         return np.zeros(env.action_dim, dtype=np.float64)
+
+    def _sync_controller(self) -> None:
+        """Point the arm controller at the live pose after a state restore."""
+        if getattr(self, "robot_model", None) is None:
+            return
+        action = self._action(self._q(), torso=0.0)
+        self.env.step(action)
 
     def _capture_snapshot(self) -> None:
         self._snapshot = np.array(self.env.sim.get_state().flatten(), copy=True)
@@ -207,8 +252,6 @@ class Sim:
 
     # ----------------------------------------------------------------- methods
     def open(self, p):
-        from robocasa.utils.env_utils import create_env
-
         if self.env is not None:
             self.close({})
 
@@ -226,16 +269,17 @@ class Sim:
         self.preview_mode = str(p.get("preview") or "off")
         if self.preview_mode not in ("off", "shoulder", "third_person"):
             self.preview_mode = "off"
-        self.env = create_env(
+        self.env = make_env(
             self.task,
-            camera_names=[self.camera],
-            camera_widths=self.width,
-            camera_heights=self.height,
-            seed=self.seed,
-            render_onscreen=False,
-            layout_and_style_ids=ls,
+            self.camera,
+            self.width,
+            self.height,
+            self.seed,
+            ls,
         )
         self.obs = self.env.reset()
+        self._bind_robot()
+        self._settle_home()
         self.steps = 0
         self.shot_index = 0
         self.torso_cmd = 0.0
@@ -253,9 +297,57 @@ class Sim:
             "open_seconds": round(time.time() - t0, 2),
         }
 
+    def _bind_robot(self) -> None:
+        """Cache action slices and build the planning stack for this env."""
+        env = self.env
+        cc = env.robots[0].composite_controller
+        self.arm_slice = cc._action_split_indexes["right"]
+        self.grip_slice = cc._action_split_indexes.get("right_gripper")
+        self.base_slice = cc._action_split_indexes.get("base")
+        self.torso_slice = cc._action_split_indexes.get("torso")
+        self.home_q = np.asarray(env.robots[0].init_qpos, dtype=np.float64).copy()
+        self.robot_model = RobotModel(env)
+        try:
+            self.robot_model.calibrate(_quat_to_mat(env._get_observations(force_update=True)["robot0_eef_quat"]))
+        except Exception:
+            pass
+        self.checker = CollisionChecker(self.robot_model)
+        self.planner = Planner(self.robot_model, self.checker, seed=int(time.time()) % 9973)
+
+    def _q(self) -> np.ndarray:
+        return self.robot_model.get_q()
+
+    def _action(self, q=None, gripper=None, torso=None, base=None) -> np.ndarray:
+        """Absolute joint targets for the arm; everything else as before.
+
+        The arm slice must always carry a target: a zero vector would drive the
+        arm to the zero pose, which is outside several joint limits.
+        """
+        env = self.env
+        action = np.zeros(env.action_dim, dtype=np.float64)
+        a, b = self.arm_slice
+        action[a:b] = self._q() if q is None else np.asarray(q, dtype=np.float64)[: b - a]
+        if gripper is not None and self.grip_slice:
+            action[self.grip_slice[0]] = _gripper_value(gripper)
+        if torso is not None and self.torso_slice:
+            action[self.torso_slice[0]] = float(torso)
+        if base is not None and self.base_slice:
+            action[self.base_slice[0]] = float(base[0])
+            action[self.base_slice[0] + 1] = float(base[1])
+            action[self.base_slice[0] + 2] = float(base[2])
+        return action
+
+    def _settle_home(self, steps: int = 18) -> None:
+        """Return to the robot's initial pose: absolute joint control starts at zero."""
+        action = self._action(self.home_q, torso=0.0)
+        for _ in range(steps):
+            self.obs, _, _, _ = self.env.step(action)
+        self.torso_cmd = 0.0
+
     def reset(self, p):
         env = self._require_env()
         self.obs = env.reset()
+        self._settle_home()
         self.steps = 0
         self.torso_cmd = 0.0
         self._capture_snapshot()
@@ -280,6 +372,7 @@ class Sim:
             except Exception:
                 pass
         self.obs = env._get_observations(force_update=True)
+        self._sync_controller()
         self.steps = 0
         return {
             "eef_pos": self._eef_pos(),
@@ -533,11 +626,29 @@ class Sim:
         }
 
     def act(self, p):
+        """Hold the current joint targets and drive the gripper (and base/torso)."""
         env = self._require_env()
         steps = max(1, min(int(p.get("steps", 1)), 200))
         if p.get("torso") is not None:
             self.torso_cmd = float(p["torso"])
-        action = _fill_action(env, {**p, "torso": self.torso_cmd})
+        if any(k in p for k in ("dx", "dy", "dz")):
+            cur = self._eef_pos()
+            target = np.array([cur[0] + float(p.get("dx", 0.0)),
+                               cur[1] + float(p.get("dy", 0.0)),
+                               cur[2] + float(p.get("dz", 0.0))])
+            moved = self.move({"x": float(target[0]), "y": float(target[1]), "z": float(target[2]),
+                               "gripper": p.get("gripper"), "max_steps": steps})
+            return {
+                "steps": self.steps,
+                "eef_pos": self._eef_pos(),
+                "eef_quat": self._eef_quat(),
+                "move_residual_m": moved.get("residual_m"),
+                "success": self._success(),
+            }
+        base = None
+        if any(k in p for k in ("forward", "side", "yaw")):
+            base = (p.get("forward", 0.0), p.get("side", 0.0), p.get("yaw", 0.0))
+        action = self._action(gripper=p.get("gripper"), torso=self.torso_cmd, base=base)
         for _ in range(steps):
             self.obs, _, _, _ = env.step(action)
             self.steps += 1
@@ -549,73 +660,80 @@ class Sim:
             "success": self._success(),
         }
 
+    def _target_rot(self, p):
+        """Resolve an absolute orientation target from quat or yaw_deg."""
+        if p.get("quat"):
+            return _quat_to_mat(p["quat"])
+        if p.get("yaw_deg") is not None:
+            R_now = _quat_to_mat(self.obs["robot0_eef_quat"])
+            delta = np.radians(float(p["yaw_deg"])) - _yaw_of_mat(R_now)
+            # A parallel-jaw gripper is symmetric under 180 degrees, so take the
+            # equivalent yaw that needs the smaller wrist rotation.
+            delta = (delta + np.pi / 2) % np.pi - np.pi / 2
+            c, s = np.cos(delta), np.sin(delta)
+            return np.array([[c, -s, 0.0], [s, c, 0.0], [0.0, 0.0, 1.0]]) @ R_now
+        return None
+
+    def _servo(self, q_goal, gripper, max_steps, target, target_rot, tol, rot_tol):
+        """Hold an absolute joint target until the end effector converges."""
+        env = self.env
+        action = self._action(q_goal, gripper=gripper, torso=self.torso_cmd)
+        used = 0
+        residual = float(np.linalg.norm(np.asarray(target) - self._eef_pos()))
+        rot_residual = 0.0
+        for _ in range(max_steps):
+            self.obs, _, _, _ = env.step(action)
+            self.steps += 1
+            used += 1
+            self._after_step()
+            residual = float(np.linalg.norm(np.asarray(target, dtype=np.float64) - self._eef_pos()))
+            if target_rot is not None:
+                R_now = _quat_to_mat(self.obs["robot0_eef_quat"])
+                rot_residual = float(np.linalg.norm(_rotvec_from_mat(target_rot @ R_now.T)))
+            if residual <= tol and rot_residual <= rot_tol:
+                break
+        return used, residual, rot_residual
+
     def move(self, p):
-        """Proportional move of the end effector toward a world-space target."""
+        """Inverse-kinematics move to a world-space pose under joint control."""
         env = self._require_env()
         target = np.array([float(p["x"]), float(p["y"]), float(p["z"])], dtype=np.float64)
         gripper = p.get("gripper")
         max_steps = max(1, min(int(p.get("max_steps", 80)), 400))
         tol = float(p.get("tol", 0.015))
-        scale = float(p.get("scale", 0.05))
-        action = _fill_action(
-            env,
-            {"torso": self.torso_cmd, "gripper": gripper} if gripper is not None else {"torso": self.torso_cmd},
-        )
-
-        gain = float(p.get("gain", 0.6))
-        gain_rot = float(p.get("gain_rot", 0.8))
         rot_tol = float(p.get("rot_tol", 0.03))
-
-        # Absolute orientation target: full quaternion, or a yaw about world z that
-        # keeps the current pitch/roll.
-        target_rot = None
-        if p.get("quat") or p.get("yaw_deg") is not None:
-            R_now = _quat_to_mat(self.obs["robot0_eef_quat"])
-            if p.get("quat"):
-                target_rot = _quat_to_mat(p["quat"])
-            else:
-                delta = np.radians(float(p["yaw_deg"])) - _yaw_of_mat(R_now)
-                # A parallel-jaw gripper is symmetric under 180 degrees, so take the
-                # equivalent yaw that needs the smaller wrist rotation.
-                delta = (delta + np.pi / 2) % np.pi - np.pi / 2
-                c, s = np.cos(delta), np.sin(delta)
-                target_rot = np.array([[c, -s, 0.0], [s, c, 0.0], [0.0, 0.0, 1.0]]) @ R_now
+        target_rot = self._target_rot(p)
 
         start = self._eef_pos()
         start_quat = self._eef_quat()
-        dist = float("inf")
-        rot_err = 0.0
-        used = 0
-        for _ in range(max_steps):
-            cur = np.array(self.obs["robot0_eef_pos"], dtype=np.float64)
-            error = target - cur
-            dist = float(np.linalg.norm(error))
-            if target_rot is not None:
-                R_now = _quat_to_mat(self.obs["robot0_eef_quat"])
-                err_w = _rotvec_from_mat(target_rot @ R_now.T)
-                rot_err = float(np.linalg.norm(err_w))
-                action[3:6] = np.clip(_world_to_base(env, err_w) / 0.5 * gain_rot, -1.0, 1.0)
-            if dist <= tol and rot_err <= rot_tol:
-                break
-            action[0:3] = np.clip(_world_to_base(self.env, error) / scale * gain, -1.0, 1.0)
-            self.obs, _, _, _ = env.step(action)
-            self.steps += 1
-            used += 1
-            self._after_step()
-        end = self._eef_pos()
-        # Recompute from the final pose: the loop may exit before ever updating
-        # these, which previously leaked Infinity into the JSON reply.
-        end_arr = np.asarray(end, dtype=np.float64)
-        dist = float(np.linalg.norm(target - end_arr))
-        if target_rot is not None:
-            R_end = _quat_to_mat(self.obs["robot0_eef_quat"])
-            rot_err = float(np.linalg.norm(_rotvec_from_mat(target_rot @ R_end.T)))
+        q_goal, ik_info = self.robot_model.ik_multi(
+            target, target_rot=target_rot, iters=300, tries=24, collect=6, margin=0.10, seed=self.steps
+        )
+        if q_goal is None:
+            return {
+                "start": start,
+                "target": [float(v) for v in target],
+                "end": self._eef_pos(),
+                "residual_m": _num(float(np.linalg.norm(target - self._eef_pos()))),
+                "rot_residual_rad": 0.0,
+                "start_quat": start_quat,
+                "end_quat": self._eef_quat(),
+                "steps_used": 0,
+                "total_steps": self.steps,
+                "ik_failed": True,
+                "ik": ik_info,
+                "success": self._success(),
+            }
+
+        used, residual, rot_residual = self._servo(
+            q_goal, gripper, max_steps, target, target_rot, tol, rot_tol
+        )
         return {
             "start": start,
             "target": [float(v) for v in target],
-            "end": end,
-            "residual_m": _num(dist),
-            "rot_residual_rad": _num(rot_err),
+            "end": self._eef_pos(),
+            "residual_m": _num(residual),
+            "rot_residual_rad": _num(rot_residual),
             "start_quat": start_quat,
             "end_quat": self._eef_quat(),
             "steps_used": used,
@@ -624,11 +742,10 @@ class Sim:
         }
 
     def rotate(self, p):
-        """Closed-loop rotation by a relative amount, in degrees, about world axes."""
+        """Rotate the gripper by a relative amount about world axes."""
         env = self._require_env()
         max_steps = max(1, min(int(p.get("max_steps", 60)), 400))
         tol = float(p.get("tol", 0.03))
-        gain = float(p.get("gain_rot", 0.8))
         delta = np.radians([
             float(p.get("droll", 0.0)),
             float(p.get("dpitch", 0.0)),
@@ -645,24 +762,30 @@ class Sim:
             }
 
         R_target = _mat_from_rotvec(delta) @ _quat_to_mat(start_quat)
-        action = _fill_action(
-            env,
-            {"torso": self.torso_cmd, "gripper": p.get("gripper")} if p.get("gripper")
-            else {"torso": self.torso_cmd},
+        q_goal, ik_info = self.robot_model.ik_multi(
+            self._eef_pos(), target_rot=R_target, iters=300, tries=24, collect=6, margin=0.10, seed=self.steps
         )
-        err = float("inf")
-        used = 0
-        for _ in range(max_steps):
-            R_now = _quat_to_mat(self.obs["robot0_eef_quat"])
-            err_w = _rotvec_from_mat(R_target @ R_now.T)
-            err = float(np.linalg.norm(err_w))
-            if err <= tol:
-                break
-            action[3:6] = np.clip(_world_to_base(env, err_w) / 0.5 * gain, -1.0, 1.0)
-            self.obs, _, _, _ = env.step(action)
-            self.steps += 1
-            used += 1
-            self._after_step()
+        if q_goal is None:
+            return {
+                "start_quat": start_quat,
+                "end_quat": start_quat,
+                "residual_rad": 0.0,
+                "steps_used": 0,
+                "total_steps": self.steps,
+                "ik_failed": True,
+                "ik": ik_info,
+            }
+
+        anchor = self._eef_pos()
+        used, _, rot_residual = self._servo(
+            q_goal, p.get("gripper"), max_steps, anchor, R_target, 0.05, tol
+        )
+        self._last_rot_debug = {
+            "ik": ik_info,
+            "q_goal": [round(float(v), 3) for v in q_goal],
+            "q_end": [round(float(v), 3) for v in self._q()],
+            "rot_err_during": round(float(rot_residual), 4),
+        }
         end_quat = self._eef_quat()
         err = float(np.linalg.norm(_rotvec_from_mat(R_target @ _quat_to_mat(end_quat).T)))
         return {
@@ -671,6 +794,7 @@ class Sim:
             "residual_rad": _num(err),
             "steps_used": used,
             "total_steps": self.steps,
+            "debug": getattr(self, "_last_rot_debug", None),
         }
 
     def grasp(self, p):
@@ -861,28 +985,6 @@ class Sim:
         return {"closed": True}
 
 
-def _base_rotation(env) -> np.ndarray:
-    """Rotation of the OSC reference frame (world = R @ base), or identity."""
-    try:
-        cc = env.robots[0].composite_controller
-        ori = cc.part_controllers["right"].origin_ori
-        if ori is not None:
-            return np.array(ori, dtype=np.float64).reshape(3, 3)
-    except Exception:
-        pass
-    try:
-        bid = env.sim.model.body_name2id("robot0_base")
-        return np.array(env.sim.data.body_xmat[bid], dtype=np.float64).reshape(3, 3)
-    except Exception:
-        return np.eye(3)
-
-
-def _world_to_base(env, delta) -> np.ndarray:
-    """OSC_POSE takes deltas in the robot base frame; callers think in world axes."""
-    rot = _base_rotation(env)
-    return rot.T @ np.asarray(delta, dtype=np.float64)
-
-
 def _num(value, digits=4) -> float:
     """Round for transport and normalise -0.0, which JSON loses on round-trip."""
     out = round(float(value), digits)
@@ -922,37 +1024,6 @@ def _mat_from_rotvec(w) -> np.ndarray:
 
 def _yaw_of_mat(R) -> float:
     return float(np.arctan2(R[1, 0], R[0, 0]))
-
-
-def _split(env, part: str):
-    """Return (start, end) of a composite-controller action slice."""
-    try:
-        cc = env.robots[0].composite_controller
-        return cc._action_split_indexes[part]
-    except Exception:
-        return None
-
-
-def _fill_action(env, p: dict) -> np.ndarray:
-    """Build a 12-dim composite action: arm delta, gripper, mobile base, torso."""
-    action = np.zeros(env.action_dim, dtype=np.float64)
-    action[0] = float(p.get("dx", 0.0))
-    action[1] = float(p.get("dy", 0.0))
-    action[2] = float(p.get("dz", 0.0))
-    gripper = p.get("gripper")
-    if gripper is not None:
-        slot = _split(env, "right_gripper")
-        idx = slot[0] if slot else len(action) - 1
-        action[idx] = _gripper_value(gripper)
-    torso = _split(env, "torso")
-    if torso and p.get("torso") is not None:
-        action[torso[0]] = float(p["torso"])
-    base = _split(env, "base")
-    if base and any(k in p for k in ("forward", "side", "yaw")):
-        action[base[0]] = float(p.get("forward", 0.0))
-        action[base[0] + 1] = float(p.get("side", 0.0))
-        action[base[0] + 2] = float(p.get("yaw", 0.0))
-    return action
 
 
 def _gripper_value(gripper) -> float:
