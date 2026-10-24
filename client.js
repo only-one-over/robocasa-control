@@ -291,6 +291,150 @@ window.__ModuleLoader__.load({
       )
     }
 
+
+    /** Shared polling for the floating widget (state every second, settings once). */
+    function useRoboCasaData() {
+      const [state, setState] = React.useState(null)
+      const [settings, setSettings] = React.useState(null)
+
+      React.useEffect(() => {
+        let alive = true
+        const tick = async () => {
+          try {
+            const response = await fetch('/robocasa/state', { cache: 'no-store' })
+            const value = await response.json()
+            if (alive) setState(value)
+          } catch {
+            /* keep last known state */
+          }
+        }
+        tick()
+        const timer = setInterval(tick, 1500)
+        return () => {
+          alive = false
+          clearInterval(timer)
+        }
+      }, [])
+
+      React.useEffect(() => {
+        let alive = true
+        fetch('/robocasa/settings')
+          .then((response) => response.json())
+          .then((value) => { if (alive) setSettings(value) })
+          .catch(() => {})
+        return () => { alive = false }
+      }, [])
+
+      return [state, settings]
+    }
+
+    /** Floating monitor that coexists with the conversation. */
+    function RoboCasaFloat() {
+      const [state, settings] = useRoboCasaData()
+      const [expanded, setExpanded] = React.useState(true)
+      const [pos, setPos] = React.useState(null)
+      const drag = React.useRef(null)
+
+      const width = settings ? Number(settings.streamWidth) || 240 : 240
+      const height = settings ? Number(settings.streamHeight) || 180 : 180
+      const scale = Math.min(1, 240 / width)
+      const showWidth = Math.round(width * scale)
+      const showHeight = Math.round(height * scale)
+
+      const onPointerDown = (event) => {
+        const box = event.currentTarget.parentElement.getBoundingClientRect()
+        drag.current = { dx: event.clientX - box.left, dy: event.clientY - box.top }
+        event.currentTarget.setPointerCapture(event.pointerId)
+      }
+      const onPointerMove = (event) => {
+        if (!drag.current) return
+        const left = Math.max(8, Math.min(window.innerWidth - 120, event.clientX - drag.current.dx))
+        const top = Math.max(8, Math.min(window.innerHeight - 80, event.clientY - drag.current.dy))
+        setPos({ left, top })
+      }
+      const onPointerUp = () => { drag.current = null }
+
+      const chrome = {
+        background: 'rgba(18, 22, 28, 0.92)',
+        color: '#e6edf3',
+        border: '1px solid rgba(255, 255, 255, 0.14)',
+        borderRadius: 10,
+        boxShadow: '0 10px 30px rgba(0, 0, 0, 0.35)',
+        pointerEvents: 'auto',
+        overflow: 'hidden',
+      }
+      const placement = pos
+        ? { position: 'fixed', left: pos.left, top: pos.top }
+        : { position: 'fixed', right: 18, bottom: 18 }
+
+      if (!expanded) {
+        return h(
+          'div',
+          { style: { ...placement, ...chrome, width: 44, height: 44, display: 'grid', placeItems: 'center' } },
+          h(
+            'button',
+            {
+              type: 'button',
+              title: '打开 RoboCasa 预览',
+              onClick: () => setExpanded(true),
+              style: { background: 'transparent', border: 0, color: 'inherit', cursor: 'pointer', padding: 6 },
+            },
+            h(RoboCasaIcon, { size: 22, active: true }),
+          ),
+        )
+      }
+
+      const open = Boolean(state && state.open)
+      return h(
+        'div',
+        { style: { ...placement, ...chrome, width: showWidth + 20 } },
+        h(
+          'div',
+          {
+            onPointerDown,
+            onPointerMove,
+            onPointerUp,
+            style: {
+              display: 'flex',
+              alignItems: 'center',
+              justifyContent: 'space-between',
+              gap: 8,
+              padding: '5px 8px',
+              cursor: 'grab',
+              fontSize: 11,
+              fontFamily: MONO,
+              background: 'rgba(255, 255, 255, 0.05)',
+              touchAction: 'none',
+            },
+          },
+          h('span', null, open ? `${state.task.replace('PickPlace', '')} · s${state.seed}` : '未打开场景'),
+          h(
+            'button',
+            {
+              type: 'button',
+              title: '收起',
+              onClick: () => setExpanded(false),
+              style: { background: 'transparent', border: 0, color: 'inherit', cursor: 'pointer', fontSize: 13, lineHeight: 1 },
+            },
+            '—',
+          ),
+        ),
+        h('img', {
+          key: `/robocasa/frame.mjpg?w=${width}&h=${height}`,
+          src: `/robocasa/frame.mjpg?w=${width}&h=${height}`,
+          alt: 'RoboCasa preview',
+          width: showWidth,
+          height: showHeight,
+          style: { display: 'block', width: showWidth, height: showHeight, objectFit: 'cover', background: '#000' },
+        }),
+        h(
+          'div',
+          { style: { padding: '4px 8px', fontSize: 11, fontFamily: MONO, opacity: 0.8 } },
+          open ? `step ${state.steps} · ${state.success ? 'success' : 'running'}` : '打开场景后显示画面',
+        ),
+      )
+    }
+
     return {
       inject: ['slots'],
       apply(ctx) {
@@ -302,6 +446,12 @@ window.__ModuleLoader__.load({
         )
         ctx.slots.inject('main', () =>
           ctx.slots.register({ name: 'main', key: 'robocasa' }, RoboCasaPanel),
+        )
+        ctx.slots.inject('shell.overlay', () =>
+          ctx.slots.register(
+            { name: 'shell.overlay', id: 'robocasa-float', order: 10, label: 'RoboCasa 悬浮预览' },
+            RoboCasaFloat,
+          ),
         )
       },
     }
