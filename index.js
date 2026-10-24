@@ -144,11 +144,7 @@ function runDoctor(pythonPath, deep, signal) {
   return new Promise((resolve, reject) => {
     const child = spawn(pythonPath, [script, ...(deep ? ['--deep'] : [])], {
       cwd: HERE,
-      env: {
-        ...process.env,
-        PYTHONUNBUFFERED: '1',
-        ROBOCASA_PREVIEW_PATH: previewPathFor(this.config || {}),
-      },
+      env: { ...process.env, PYTHONUNBUFFERED: '1' },
       stdio: ['ignore', 'pipe', 'pipe'],
     })
     let stdout = ''
@@ -231,7 +227,11 @@ class SimWorker {
     if (!python) throw new Error('python interpreter not resolved; call resolvePython first')
     const child = spawn(python, [this.workerScript], {
       cwd: this.cwd,
-      env: { ...process.env, PYTHONUNBUFFERED: '1' },
+      env: {
+        ...process.env,
+        PYTHONUNBUFFERED: '1',
+        ROBOCASA_PREVIEW_PATH: previewPathFor(this.config || {}),
+      },
       stdio: ['pipe', 'pipe', 'pipe'],
     })
     this.child = child

@@ -3,3 +3,5 @@ __pycache__/
 preview.png
 preview.png.tmp
 settings.json
+MUJOCO_LOG.TXT
+*.log
