@@ -59,6 +59,8 @@ class Sim:
         self._snapshot = None
         self.torso_cmd = 0.0
         self.preview_mode = "off"
+        self.stream_on = False
+        self.preview_size = (320, 240)
         self.preview_params = dict(Sim.FREE_DEFAULTS)
         self.preview_every = 2
         self._preview_tick = 0
@@ -114,19 +116,20 @@ class Sim:
     def _write_preview(self) -> None:
         """Publish a small frame for the external viewer window to display."""
         try:
+            width, height = self.preview_size
             if self.preview_mode == "third_person":
-                png = self._render_free(self.preview_params, 320, 240)
+                png = self._encode_png(self._render_free(self.preview_params, width, height))
             else:
-                png = self._render(width=320, height=240)
+                png = self._render(width=width, height=height)
             tmp = PREVIEW_PATH + ".tmp"
             with open(tmp, "wb") as fh:
                 fh.write(png)
             os.replace(tmp, PREVIEW_PATH)
-        except Exception:
-            pass
+        except Exception as exc:
+            log(f"preview write failed: {type(exc).__name__}: {exc}")
 
     def _after_step(self) -> None:
-        if self.preview_mode == "off":
+        if self.preview_mode == "off" and not self.stream_on:
             return
         self._preview_tick += 1
         if self._preview_tick % self.preview_every == 0:
@@ -172,6 +175,16 @@ class Sim:
         img = env.sim.render(width=width, height=height, camera_name=None, depth=False)
         return np.asarray(img)[::-1]
 
+    @staticmethod
+    def _encode_png(img) -> bytes:
+        from PIL import Image  # noqa: PLC0415
+
+        if img.dtype != np.uint8:
+            img = img.astype(np.uint8)
+        buf = io.BytesIO()
+        Image.fromarray(img).save(buf, format="PNG")
+        return buf.getvalue()
+
     def _render(self, camera=None, width=None, height=None, free=None) -> bytes:
         env = self._require_env()
         camera = camera or self.camera
@@ -182,13 +195,7 @@ class Sim:
         else:
             img = env.sim.render(width=width, height=height, camera_name=camera, depth=False)
             img = np.asarray(img)[::-1]
-        if img.dtype != np.uint8:
-            img = img.astype(np.uint8)
-        from PIL import Image
-
-        buf = io.BytesIO()
-        Image.fromarray(img).save(buf, format="PNG")
-        return buf.getvalue()
+        return self._encode_png(img)
 
     def _save_shot(self, png: bytes) -> str:
         os.makedirs(self.shots_dir, exist_ok=True)
@@ -233,8 +240,7 @@ class Sim:
         self.shot_index = 0
         self.torso_cmd = 0.0
         self._capture_snapshot()
-        if self.preview_mode != "off":
-            self._write_preview()
+        self._write_preview()
         log(f"opened {self.task} seed={self.seed} preview={self.preview_mode} in {time.time() - t0:.1f}s")
         return {
             "task": self.task,
@@ -751,6 +757,13 @@ class Sim:
             "mode": self.preview_mode,
         }
 
+    def set_streaming(self, p):
+        """Enable frame writing for web clients without touching the preview window."""
+        self.stream_on = bool(p.get("on"))
+        if self.stream_on:
+            self._write_preview()
+        return {"streaming": self.stream_on}
+
     def jog(self, p):
         """Move the end effector by a relative world delta (metres)."""
         self._require_env()
@@ -796,6 +809,9 @@ class Sim:
         if p.get("camera"):
             self.camera = str(p["camera"])
             changed["camera"] = self.camera
+        if p.get("streamWidth") and p.get("streamHeight"):
+            self.preview_size = (int(p["streamWidth"]), int(p["streamHeight"]))
+            changed["preview_size"] = list(self.preview_size)
         if p.get("detectorModel"):
             self.detector_id = str(p["detectorModel"])
             self._detector = None
@@ -1041,6 +1057,7 @@ METHODS = {
     "status": Sim.status,
     "frame": Sim.frame,
     "state": Sim.state,
+    "set_streaming": Sim.set_streaming,
     "jog": Sim.jog,
     "grasp_object": Sim.grasp_object,
     "configure": Sim.configure,

@@ -110,8 +110,7 @@ window.__ModuleLoader__.load({
       const [state, setState] = React.useState(null)
       const [settings, setSettings] = React.useState(null)
       const [error, setError] = React.useState(null)
-      const [busy, setBusy] = React.useState(null)
-      const [message, setMessage] = React.useState(null)
+      const [workers, setWorkers] = React.useState([])
 
       React.useEffect(() => {
         let alive = true
@@ -137,6 +136,25 @@ window.__ModuleLoader__.load({
 
       React.useEffect(() => {
         let alive = true
+        const tick = async () => {
+          try {
+            const response = await fetch('/robocasa/workers', { cache: 'no-store' })
+            const value = await response.json()
+            if (alive) setWorkers(value.workers || [])
+          } catch {
+            /* keep the last list */
+          }
+        }
+        tick()
+        const timer = setInterval(tick, 2000)
+        return () => {
+          alive = false
+          clearInterval(timer)
+        }
+      }, [])
+
+      React.useEffect(() => {
+        let alive = true
         fetch('/robocasa/settings')
           .then((response) => response.json())
           .then((value) => { if (alive) setSettings(value) })
@@ -153,37 +171,18 @@ window.__ModuleLoader__.load({
         }).catch(() => {})
       }
 
-      const setPreview = (mode) => {
-        fetch('/robocasa/preview', {
+      const closeWorker = (pid) => {
+        fetch('/robocasa/workers', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ mode }),
+          body: JSON.stringify({ pid }),
         }).catch(() => {})
-      }
-
-      const command = async (action, extra) => {
-        setBusy(action)
-        setMessage(null)
-        try {
-          const response = await fetch('/robocasa/command', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ action, ...(extra || {}) }),
-          })
-          const value = await response.json()
-          setMessage(value.ok ? `${action} 完成` : `${action} 失败：${value.error || '未知错误'}`)
-        } catch (err) {
-          setMessage(String(err && err.message ? err.message : err))
-        } finally {
-          setBusy(null)
-        }
       }
 
       const open = Boolean(state && state.open)
       const fmt = (value) => (typeof value === 'number' ? value.toFixed(3) : '-')
       const width = settings ? Number(settings.streamWidth) || 320 : 320
       const height = settings ? Number(settings.streamHeight) || 240 : 240
-      const streamSrc = `/robocasa/frame.mjpg?w=${width}&h=${height}`
 
       const config = settings
         ? h(
@@ -209,6 +208,42 @@ window.__ModuleLoader__.load({
                 value: settings.camera,
                 options: CAMERAS.map((name) => [name, name.replace('robot0_', '')]),
                 onChange: (value) => patchSettings({ camera: value }),
+              }),
+            ),
+            h(
+              Field,
+              { label: '浮窗视角' },
+              h(Select, {
+                value: settings.viewMode,
+                options: [['third_person', '第三人称'], ['shoulder', '肩载']],
+                onChange: (value) => patchSettings({ viewMode: value }),
+              }),
+            ),
+            h(
+              Field,
+              { label: '方位角' },
+              h(Select, {
+                value: settings.azimuth,
+                options: [0, 45, 90, 135, 180, 225, 270, 315].map((v) => [v, `${v}°`]),
+                onChange: (value) => patchSettings({ azimuth: Number(value) }),
+              }),
+            ),
+            h(
+              Field,
+              { label: '俯角' },
+              h(Select, {
+                value: settings.elevation,
+                options: [-15, -25, -32, -45, -62].map((v) => [v, `${v}°`]),
+                onChange: (value) => patchSettings({ elevation: Number(v) }),
+              }),
+            ),
+            h(
+              Field,
+              { label: '距离' },
+              h(Select, {
+                value: settings.distance,
+                options: [1.8, 2.2, 2.8, 3.6, 4.5].map((v) => [v, `${v} m`]),
+                onChange: (value) => patchSettings({ distance: Number(value) }),
               }),
             ),
             h(
@@ -262,23 +297,6 @@ window.__ModuleLoader__.load({
           ),
         ),
 
-        h('img', {
-          key: streamSrc,
-          src: streamSrc,
-          alt: 'RoboCasa live view',
-          width,
-          height,
-          style: {
-            width,
-            height,
-            maxWidth: '100%',
-            objectFit: 'cover',
-            border: BORDER,
-            borderRadius: 8,
-            background: '#000',
-          },
-        }),
-
         open
           ? h(
               'div',
@@ -301,44 +319,35 @@ window.__ModuleLoader__.load({
 
         h(
           'div',
-          { style: { display: 'flex', gap: 8, flexWrap: 'wrap' } },
-          h(Button, { active: open && state.preview === 'shoulder', onClick: () => setPreview('shoulder'), disabled: !open }, '肩载'),
-          h(Button, { active: open && state.preview === 'third_person', onClick: () => setPreview('third_person'), disabled: !open }, '第三人称'),
-          h(Button, { active: open && state.preview === 'off', onClick: () => setPreview('off'), disabled: !open }, '关闭'),
-        ),
-
-        h(
-          'div',
-          { style: { display: 'flex', flexDirection: 'column', gap: 8, marginTop: 4 } },
-          h('div', { style: { fontSize: 12, opacity: 0.6, letterSpacing: '0.04em' } }, '控制'),
-          h(
-            'div',
-            { style: { display: 'grid', gridTemplateColumns: 'repeat(3, 44px)', gap: 6 } },
-            h(Button, { disabled: !open || busy, onClick: () => command('jog', { dx: -0.05 }) }, 'X−'),
-            h(Button, { disabled: !open || busy, onClick: () => command('jog', { dx: 0.05 }) }, 'X+'),
-            h(Button, { disabled: !open || busy, onClick: () => command('jog', { dz: 0.05 }) }, 'Z+'),
-            h(Button, { disabled: !open || busy, onClick: () => command('jog', { dy: -0.05 }) }, 'Y−'),
-            h(Button, { disabled: !open || busy, onClick: () => command('jog', { dy: 0.05 }) }, 'Y+'),
-            h(Button, { disabled: !open || busy, onClick: () => command('jog', { dz: -0.05 }) }, 'Z−'),
-          ),
-          h(
-            'div',
-            { style: { display: 'flex', gap: 6, flexWrap: 'wrap' } },
-            h(Button, { disabled: !open || busy, onClick: () => command('rotate', { dyaw: -15 }) }, '转 −15°'),
-            h(Button, { disabled: !open || busy, onClick: () => command('rotate', { dyaw: 15 }) }, '转 +15°'),
-            h(Button, { disabled: !open || busy, onClick: () => command('grip', { gripper: 'open' }) }, '开爪'),
-            h(Button, { disabled: !open || busy, onClick: () => command('grip', { gripper: 'close' }) }, '合爪'),
-            h(Button, { disabled: !open || busy, onClick: () => command('grasp') }, '抓取目标'),
-          ),
-          h(
-            'div',
-            { style: { display: 'flex', gap: 6, flexWrap: 'wrap' } },
-            h(Button, { disabled: !open || busy, onClick: () => command('reset') }, '新开一局'),
-            h(Button, { disabled: !open || busy, onClick: () => command('restart') }, '回开局'),
-            h(Button, { disabled: !open || busy, onClick: () => command('close') }, '关闭场景'),
-          ),
-          message ? h('div', { style: { fontSize: 11, fontFamily: MONO, opacity: 0.75 } }, message) : null,
-          busy ? h('div', { style: { fontSize: 11, fontFamily: MONO, opacity: 0.6 } }, `执行中：${busy}…`) : null,
+          { style: { display: 'flex', flexDirection: 'column', gap: 6, marginTop: 4 } },
+          h('div', { style: { fontSize: 12, opacity: 0.6, letterSpacing: '0.04em' } }, '运行中的仿真'),
+          workers.length === 0
+            ? h('div', { style: { fontSize: 12, opacity: 0.6, fontFamily: MONO } }, '没有运行中的 worker 进程')
+            : workers.map((item) =>
+                h(
+                  'div',
+                  {
+                    key: item.pid,
+                    style: {
+                      display: 'flex',
+                      alignItems: 'center',
+                      gap: 8,
+                      fontSize: 12,
+                      fontFamily: MONO,
+                      padding: '3px 6px',
+                      border: BORDER,
+                      borderRadius: 6,
+                      opacity: item.owned ? 1 : 0.72,
+                    },
+                  },
+                  h('span', null, item.owned ? '●' : '○'),
+                  h('span', { style: { minWidth: 70 } }, `PID ${item.pid}`),
+                  h('span', { style: { minWidth: 64, opacity: 0.75 } }, `${item.ageSec}s`),
+                  h('span', { style: { minWidth: 64, opacity: 0.75 } }, `${item.rssMb} MB`),
+                  h('span', { style: { flex: 1, opacity: 0.55 } }, item.owned ? '当前' : '孤儿'),
+                  h(Button, { onClick: () => closeWorker(item.pid) }, '关闭'),
+                ),
+              ),
         ),
 
         config,
@@ -473,14 +482,31 @@ window.__ModuleLoader__.load({
             '—',
           ),
         ),
-        h('img', {
-          key: `/robocasa/frame.mjpg?w=${width}&h=${height}`,
-          src: `/robocasa/frame.mjpg?w=${width}&h=${height}`,
-          alt: 'RoboCasa preview',
-          width: showWidth,
-          height: showHeight,
-          style: { display: 'block', width: showWidth, height: showHeight, objectFit: 'cover', background: '#000' },
-        }),
+        open
+          ? h('img', {
+              key: 'live',
+              src: '/robocasa/frame.mjpg',
+              alt: 'RoboCasa preview',
+              width: showWidth,
+              height: showHeight,
+              style: { display: 'block', width: showWidth, height: showHeight, objectFit: 'cover', background: '#000' },
+            })
+          : h(
+              'div',
+              {
+                style: {
+                  display: 'grid',
+                  placeItems: 'center',
+                  width: showWidth,
+                  height: showHeight,
+                  background: 'rgba(255, 255, 255, 0.05)',
+                  fontSize: 11,
+                  fontFamily: MONO,
+                  opacity: 0.7,
+                },
+              },
+              '未打开场景',
+            ),
         h(
           'div',
           { style: { padding: '4px 8px', fontSize: 11, fontFamily: MONO, opacity: 0.8 } },

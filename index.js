@@ -7,7 +7,7 @@
  */
 
 import { spawn } from 'node:child_process'
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, readdirSync, readFileSync, statSync, writeFileSync } from 'node:fs'
 import { access, constants } from 'node:fs/promises'
 import { basename, dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -27,6 +27,10 @@ const DEFAULT_SETTINGS = {
   previewEvery: 2,
   streamWidth: 320,
   streamHeight: 240,
+  viewMode: 'third_person',
+  azimuth: 200,
+  elevation: -32,
+  distance: 2.8,
 }
 
 const readSettings = () => {
@@ -127,6 +131,8 @@ class SimWorker {
     this.pending = new Map()
     this.buffer = ''
     this.stderr = []
+    /** True only while this plugin knows a scene is open in the worker. */
+    this.sceneOpen = false
     /** Last abnormal worker exit, kept until a later call succeeds. */
     this.crashed = null
   }
@@ -168,6 +174,7 @@ class SimWorker {
       // Ignore a worker that a newer one already replaced (close/restart races).
       if (this.child !== child) return
       this.child = null
+      this.sceneOpen = false
       this.crashed = signal ? `signal ${signal}` : `exit code ${code}`
       this.#failAll(new Error(`simulation worker exited (code ${code})`))
     })
@@ -248,6 +255,10 @@ class SimWorker {
         reject(this.#decorate(error))
       }
     })
+  }
+
+  get pid() {
+    return this.child ? this.child.pid : undefined
   }
 
   stop() {
@@ -379,6 +390,11 @@ export function apply(ctx, config = {}) {
 
   const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms))
 
+  // Handlers outlive route disposal unless they observe this flag: a streaming
+  // loop that keeps polling would respawn a worker after the plugin unloads.
+  let disposed = false
+  ctx.effect(() => () => { disposed = true })
+
   const sendJson = (res, value, status = 200) => {
     const body = JSON.stringify(value)
     res.writeHead(status, {
@@ -390,16 +406,12 @@ export function apply(ctx, config = {}) {
   }
 
   /** MJPEG stream: one frame per request cycle, no state kept between clients. */
-  const clampInt = (value, fallback, min, max) => {
-    const parsed = Number(value)
-    if (!Number.isFinite(parsed)) return fallback
-    return Math.min(max, Math.max(min, Math.round(parsed)))
-  }
-
   const streamFrames = async (req, res) => {
-    const query = new URL(req.url ?? '/', 'http://localhost').searchParams
-    const width = clampInt(query.get('w'), readSettings().streamWidth, 160, 800)
-    const height = clampInt(query.get('h'), readSettings().streamHeight, 120, 600)
+    if (!worker.sceneOpen) {
+      res.writeHead(503, { 'Content-Type': 'text/plain' })
+      res.end('no simulation open')
+      return
+    }
     res.writeHead(200, {
       'Content-Type': 'multipart/x-mixed-replace; boundary=frame',
       'Cache-Control': 'no-store, no-cache, must-revalidate',
@@ -407,22 +419,104 @@ export function apply(ctx, config = {}) {
     })
     let closed = false
     req.on('close', () => { closed = true })
-    while (!closed) {
-      let frame
+
+    // The worker writes frames while it steps, so this route reads the file
+    // instead of calling it: long tool calls no longer stall the stream.
+    const previewPath = join(HERE, 'preview.png')
+    let lastMtime = 0
+    let lastBytes = null
+
+    const streaming = true
+    await worker.call('set_streaming', { on: true }, { timeoutMs: 5000 }).catch(() => undefined)
+
+    while (!closed && !disposed) {
+      let bytes = null
       try {
-        frame = await worker.call('frame', { width, height }, { timeoutMs: 5000 })
+        const stamp = statSync(previewPath).mtimeMs
+        if (stamp !== lastMtime) {
+          lastBytes = readFileSync(previewPath)
+          lastMtime = stamp
+        }
+        bytes = lastBytes
       } catch {
-        await sleep(500)
+        bytes = null
+      }
+      if (!bytes) {
+        await sleep(300)
         continue
       }
-      const bytes = Buffer.from(frame.image_png_base64, 'base64')
       res.write('--frame\r\nContent-Type: image/png\r\n')
       res.write(`Content-Length: ${bytes.length}\r\n\r\n`)
       res.write(bytes)
       res.write('\r\n')
-      await sleep(120)
+      await sleep(90)
+    }
+    if (streaming) {
+      await worker.call('set_streaming', { on: false }, { timeoutMs: 5000 }).catch(() => undefined)
     }
     res.end()
+  }
+
+  const WORKER_MARK = 'robocasa-control/worker.py'
+
+  const listWorkers = () => {
+    const owned = worker.pid
+    let uptime = 0
+    try {
+      uptime = Number(readFileSync('/proc/uptime', 'utf8').split(' ')[0])
+    } catch {}
+    let entries = []
+    try {
+      entries = readdirSync('/proc').filter((name) => /^\d+$/.test(name))
+    } catch {}
+    const rows = []
+    for (const name of entries) {
+      const pid = Number(name)
+      let cmd = ''
+      try {
+        cmd = readFileSync(`/proc/${pid}/cmdline`, 'utf8').replace(/\0/g, ' ').trim()
+      } catch {
+        continue
+      }
+      if (!cmd.includes(WORKER_MARK)) continue
+      let rssMb = 0
+      let ageSec = 0
+      try {
+        const status = readFileSync(`/proc/${pid}/status`, 'utf8')
+        const match = status.match(/VmRSS:\s+(\d+)\s+kB/)
+        if (match) rssMb = Math.round(Number(match[1]) / 1024)
+        const stat = readFileSync(`/proc/${pid}/stat`, 'utf8').split(' ')
+        ageSec = Math.max(0, Math.round(uptime - Number(stat[21]) / 100))
+      } catch {}
+      rows.push({ pid, owned: pid === owned, ageSec, rssMb })
+    }
+    rows.sort((a, b) => Number(b.owned) - Number(a.owned) || a.pid - b.pid)
+    return rows
+  }
+
+  const closeWorker = (pid) => {
+    let cmd = ''
+    try {
+      cmd = readFileSync(`/proc/${pid}/cmdline`, 'utf8').replace(/\0/g, ' ')
+    } catch {
+      return { ok: false, error: 'process not found' }
+    }
+    if (!cmd.includes(WORKER_MARK)) return { ok: false, error: 'not a robocasa worker' }
+    if (pid === worker.pid) {
+      worker.stop()
+      return { ok: true, pid, owned: true }
+    }
+    try {
+      process.kill(pid, 'SIGTERM')
+    } catch (error) {
+      return { ok: false, error: String(error?.message ?? error) }
+    }
+    setTimeout(() => {
+      try {
+        process.kill(pid, 'SIGKILL')
+      } catch {}
+    }, 2000)
+    return { ok: true, pid, owned: false }
   }
 
   const web = ctx.get('webServer')
@@ -431,6 +525,10 @@ export function apply(ctx, config = {}) {
       kind: 'exact',
       path: '/robocasa/state',
       handler: async (req, res) => {
+        if (!worker.sceneOpen) {
+          sendJson(res, { open: false, preview: 'off' })
+          return
+        }
         try {
           const value = await worker.call('state', {}, { timeoutMs: 10_000 })
           sendJson(res, value)
@@ -446,6 +544,29 @@ export function apply(ctx, config = {}) {
     }))
     disposers.push(web.register({
       kind: 'exact',
+      path: '/robocasa/workers',
+      handler: async (req, res) => {
+        if (req.method === 'POST') {
+          let body = ''
+          try {
+            for await (const chunk of req) body += chunk
+            const payload = body ? JSON.parse(body) : {}
+            const pid = Number(payload.pid)
+            if (!Number.isInteger(pid) || pid <= 0) {
+              sendJson(res, { ok: false, error: 'pid required' }, 400)
+              return
+            }
+            sendJson(res, closeWorker(pid))
+          } catch (error) {
+            sendJson(res, { ok: false, error: String(error?.message ?? error) }, 400)
+          }
+          return
+        }
+        sendJson(res, { workers: listWorkers(), owned: worker.pid ?? null })
+      },
+    }))
+    disposers.push(web.register({
+      kind: 'exact',
       path: '/robocasa/settings',
       handler: async (req, res) => {
         if (req.method === 'POST') {
@@ -454,7 +575,15 @@ export function apply(ctx, config = {}) {
             for await (const chunk of req) body += chunk
             const patch = body ? JSON.parse(body) : {}
             const next = writeSettings(patch)
-            await worker.call('configure', next, { timeoutMs: 10_000 }).catch(() => undefined)
+            if (worker.sceneOpen) {
+              await worker.call('configure', next, { timeoutMs: 10_000 }).catch(() => undefined)
+              await worker.call('set_preview', {
+                mode: next.viewMode,
+                azimuth: next.azimuth,
+                elevation: next.elevation,
+                distance: next.distance,
+              }, { timeoutMs: 10_000 }).catch(() => undefined)
+            }
             sendJson(res, next)
           } catch (error) {
             sendJson(res, { error: String(error?.message ?? error) }, 400)
@@ -466,44 +595,14 @@ export function apply(ctx, config = {}) {
     }))
     disposers.push(web.register({
       kind: 'exact',
-      path: '/robocasa/command',
-      handler: async (req, res) => {
-        if (req.method !== 'POST') {
-          sendJson(res, { error: 'POST only' }, 405)
-          return
-        }
-        let body = ''
-        try {
-          for await (const chunk of req) body += chunk
-          const payload = body ? JSON.parse(body) : {}
-          const action = String(payload.action ?? '')
-          let value
-          if (action === 'jog') {
-            value = await worker.call('jog', payload, { timeoutMs: 120_000 })
-          } else if (action === 'rotate') {
-            value = await worker.call('rotate', payload, { timeoutMs: 120_000 })
-          } else if (action === 'grip') {
-            value = await worker.call('act', { gripper: payload.gripper, steps: 12 }, { timeoutMs: 60_000 })
-          } else if (action === 'grasp') {
-            value = await worker.call('grasp_object', { name: payload.name || 'obj' }, { timeoutMs: 600_000 })
-          } else if (action === 'reset' || action === 'restart' || action === 'close') {
-            value = await worker.call(action, {}, { timeoutMs: 120_000 })
-          } else {
-            sendJson(res, { error: `unknown action: ${action}` }, 400)
-            return
-          }
-          sendJson(res, { ok: true, action, value })
-        } catch (error) {
-          sendJson(res, { ok: false, error: String(error?.message ?? error) }, 200)
-        }
-      },
-    }))
-    disposers.push(web.register({
-      kind: 'exact',
       path: '/robocasa/preview',
       handler: async (req, res) => {
         let body = ''
         try {
+          if (!worker.sceneOpen) {
+            sendJson(res, { error: 'no simulation open' }, 409)
+            return
+          }
           for await (const chunk of req) body += chunk
           const payload = body ? JSON.parse(body) : {}
           const value = await worker.call('set_preview', payload, { timeoutMs: 30_000 })
@@ -634,15 +733,24 @@ export function apply(ctx, config = {}) {
         { timeoutMs: 300_000, signal: exec.signal },
       )
       const status = await worker.call('status', {}, { timeoutMs: 30_000, signal: exec.signal })
+      worker.sceneOpen = true
       await worker.call(
         'configure',
         {
           camera: args.camera || settings.camera,
           detectorThreshold: settings.detectorThreshold,
           previewEvery: settings.previewEvery,
+          streamWidth: settings.streamWidth,
+          streamHeight: settings.streamHeight,
         },
         { timeoutMs: 10_000 },
       ).catch(() => undefined)
+      await worker.call('set_preview', {
+        mode: settings.viewMode || 'third_person',
+        azimuth: settings.azimuth,
+        elevation: settings.elevation,
+        distance: settings.distance,
+      }, { timeoutMs: 10_000 }).catch(() => undefined)
       run.manifest.environment = result.versions || {}
       run.manifest.stats.steps = 0
       record('open', { task: result.task, seed: result.seed, camera: result.camera })
@@ -1103,6 +1211,7 @@ export function apply(ctx, config = {}) {
     isConcurrencySafe: () => false,
     async execute() {
       await worker.call('close', {}, { timeoutMs: 30_000 }).catch(() => undefined)
+      worker.sceneOpen = false
       record('close')
       worker.stop()
       return { closed: true, run_dir: run?.dir }
