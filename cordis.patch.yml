@@ -1,0 +1,6 @@
+- insert:
+    - id: robocasa-control
+      name: '@local/robocasa-control'
+      config:
+        pythonPath: /home/zhu/miniconda3/envs/robocasa/bin/python
+        storageRoot: /home/zhu/桌面/harness-skills-demo/robocasa-runs

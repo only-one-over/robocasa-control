@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "RoboCasa Simulation Control",
+    "description": "Drive a RoboCasa kitchen simulation from chat: open a scene, look through the robot camera, move the gripper and check task success."
+  }
+}

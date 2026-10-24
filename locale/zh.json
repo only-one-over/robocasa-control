@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "RoboCasa 仿真控制",
+    "description": "在对话中操控 RoboCasa 厨房仿真：打开场景、查看机器人相机画面、移动夹爪并检查任务是否成功。"
+  }
+}

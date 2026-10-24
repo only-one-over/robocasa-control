@@ -1,0 +1,10 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="64" height="64" role="img" aria-label="RoboCasa simulation control">
+  <rect width="64" height="64" rx="14" fill="#1f2a37"/>
+  <path d="M14 48h36" stroke="#4fd1c5" stroke-width="3" stroke-linecap="round"/>
+  <path d="M20 48V34a10 10 0 0 1 20 0v6" stroke="#e2e8f0" stroke-width="4" stroke-linecap="round" fill="none"/>
+  <circle cx="20" cy="34" r="4" fill="#4fd1c5"/>
+  <path d="M40 40l8-6" stroke="#e2e8f0" stroke-width="4" stroke-linecap="round"/>
+  <path d="M46 30l4-6M50 34l4-4" stroke="#4fd1c5" stroke-width="3" stroke-linecap="round"/>
+  <circle cx="14" cy="20" r="6" fill="none" stroke="#4fd1c5" stroke-width="2.5"/>
+  <circle cx="14" cy="20" r="1.8" fill="#4fd1c5"/>
+</svg>

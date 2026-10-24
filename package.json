@@ -1,0 +1,25 @@
+{
+  "name": "@local/robocasa-control",
+  "version": "0.8.1",
+  "private": true,
+  "type": "module",
+  "description": "Control a RoboCasa kitchen simulation from chat.",
+  "exports": {
+    ".": "./index.js",
+    "./locale/*.json": "./locale/*.json",
+    "./icon": "./icon.svg"
+  },
+  "files": [
+    "index.js",
+    "worker.py",
+    "doctor.py",
+    "cordis.patch.yml",
+    "locale/*.json",
+    "icon.svg"
+  ],
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    }
+  }
+}
