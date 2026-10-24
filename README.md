@@ -175,28 +175,39 @@ worker 会自动选择 `cuda` 并切到 fp16；没有 GPU 时退回 CPU。
 
 ## 自由相机
 
-`robocasa_look` 的 `camera` 参数除了命名相机，还接受自由视角：
+`robocasa_look` 支持命名相机或自由视角：
 
-```
-free                                   # 默认第三人称（距离 2.8、方位 200°、俯角 -32°）
-free:az=45,el=-40,dist=2.8             # 任意角度
-free:lx=0.3,ly=-1.2,lz=1.0,dist=1.5    # 指定观察点 + 距离
+```python
+# 命名相机
+robocasa_look(camera="robot0_eye_in_hand")
+
+# 自由视角（第三人称）
+robocasa_look(free={"azimuth": 200, "elevation": -32, "distance": 2.8})
+
+# 指定观察点
+robocasa_look(free={"lookat": [0.3, -1.2, 1.0], "distance": 1.5})
 ```
 
-参数含义：`az` 绕竖直轴方位角、`el` 俯仰角（负值向下）、`dist` 距离、`lx/ly/lz` 观察点世界坐标
-（省略时看向末端执行器）。
+参数：`azimuth` 绕竖直轴方位角、`elevation` 俯仰角（负值向下）、`distance` 距离、
+`lookat` 观察点世界坐标（省略时看向末端执行器）。
 
 实现细节：robosuite 的 `sim.render(camera_name=None)` **不会**自己切成自由相机——它只在传入
 `camera_id` 时改 `cam.type`。所以 worker 显式设置 `mjCAMERA_FREE` 再渲染。
 
 **限制**：自由相机没有命名相机的内参矩阵，视觉检测（`backend="vision"`）目前只支持命名相机。
 
-## 预览窗口的两种模式
+## 预览窗口
 
-| 模式 | 开关 | 效果 |
-|---|---|---|
-| 肩载视角（默认） | 删除 `.preview_free` | 跟着机器人左肩 |
-| **第三人称全景** | `touch .preview_free` | 看整个厨房 + 机器人 |
+`robocasa_preview` 控制外置预览窗口，**立即生效，不需要重新 open**：
+
+```python
+robocasa_preview(mode="third_person")                      # 全景第三人称
+robocasa_preview(mode="third_person", azimuth=180, distance=3.2, elevation=-35)
+robocasa_preview(mode="shoulder")                          # 跟着机器人左肩
+robocasa_preview(mode="off")                               # 停止推帧（省 45% 步进开销）
+```
+
+也可以在 `robocasa_open(preview="third_person")` 时直接指定初始模式。
 
 窗口建议用 systemd 用户服务启动，避免被宿主进程组回收：
 

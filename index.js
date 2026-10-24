@@ -434,6 +434,12 @@ export function apply(ctx, config = {}) {
         camera: { type: 'string', description: 'Camera used by robocasa_look.', default: 'robot0_agentview_left' },
         width: { type: 'number', description: 'Render width in pixels (default 320).', default: 320 },
         height: { type: 'number', description: 'Render height in pixels (default 320).', default: 320 },
+        preview: {
+          type: 'string',
+          enum: ['off', 'shoulder', 'third_person'],
+          description: 'Preview frame mode for the external viewer window: off, the robot shoulder camera, or a third-person view of the scene.',
+          default: 'off',
+        },
         dir: {
           type: 'string',
           description: 'Directory for this run (manifest and frames). Defaults to '
@@ -561,7 +567,22 @@ export function apply(ctx, config = {}) {
     parameters: {
       type: 'object',
       properties: {
-        camera: { type: 'string', description: 'Override the camera for this shot, e.g. robot0_eye_in_hand for the wrist view.' },
+        camera: { type: 'string', description: 'Named camera for this shot, e.g. robot0_eye_in_hand for the wrist view.' },
+        free: {
+          type: 'object',
+          description: 'Render a free camera instead of a named one. Omit to keep using the named camera.',
+          properties: {
+            lookat: {
+              type: 'array',
+              items: { type: 'number' },
+              description: 'World point to look at; defaults to the end effector.',
+            },
+            distance: { type: 'number', description: 'Camera distance in metres (default 2.8).' },
+            azimuth: { type: 'number', description: 'Azimuth in degrees around the vertical axis (default 200).' },
+            elevation: { type: 'number', description: 'Elevation in degrees; negative looks down (default -32).' },
+          },
+          additionalProperties: false,
+        },
         width: { type: 'number', description: 'Render width in pixels; omit to use the scene default.' },
         height: { type: 'number', description: 'Render height in pixels; omit to use the scene default.' },
       },
@@ -780,6 +801,46 @@ export function apply(ctx, config = {}) {
     isConcurrencySafe: () => false,
     async execute(args, exec) {
       return worker.call('grasp', args, { timeoutMs: 600_000, signal: exec.signal })
+    },
+  }))
+
+  disposers.push(ctx.tools.register({
+    name: 'robocasa_preview',
+    description:
+      'Control the external preview window: turn it off, follow the robot shoulder camera, or show a third-person '
+      + 'view of the whole scene. Framing parameters apply to the third-person mode and take effect immediately, '
+      + 'without reopening the scene.',
+    parameters: {
+      type: 'object',
+      properties: {
+        mode: {
+          type: 'string',
+          enum: ['off', 'shoulder', 'third_person'],
+          description: 'off stops publishing frames; shoulder follows the robot camera; third_person frames the scene.',
+        },
+        lookat: {
+          type: 'array',
+          items: { type: 'number' },
+          description: 'Optional world point the third-person camera looks at (defaults to the end effector).',
+        },
+        distance: { type: 'number', description: 'Third-person camera distance in metres (default 2.8).' },
+        azimuth: { type: 'number', description: 'Third-person azimuth in degrees (default 200).' },
+        elevation: { type: 'number', description: 'Third-person elevation in degrees, negative looks down (default -32).' },
+      },
+      required: ['mode'],
+      additionalProperties: false,
+    },
+    output: {
+      schema: { type: 'object', additionalProperties: true },
+      render: (_args, value) => [text([
+        `Preview mode: ${value.mode}`,
+        `framing: distance ${round(value.params.dist)} m, azimuth ${round(value.params.az)} deg, elevation ${round(value.params.el)} deg`,
+      ].join('\n'))],
+    },
+    timeoutMs: 30_000,
+    isConcurrencySafe: () => true,
+    async execute(args, exec) {
+      return worker.call('set_preview', args, { timeoutMs: 30_000, signal: exec.signal })
     },
   }))
 

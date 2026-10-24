@@ -26,10 +26,9 @@ import numpy as np
 # RoboCasa/robosuite print banners to stdout at import time, which would corrupt
 # the JSON-RPC channel. Keep a private handle on the real stdout for protocol
 # frames, then point fd 1 at stderr so every library print becomes diagnostics.
-ONSCREEN_FLAG = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".onscreen")
-PREVIEW_FLAG = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".preview")
+
 PREVIEW_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "preview.png")
-PREVIEW_FREE_FLAG = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".preview_free")
+
 
 _PROTO_FD = os.dup(1)
 os.dup2(2, 1)
@@ -59,9 +58,8 @@ class Sim:
         self.shot_index = 0
         self._snapshot = None
         self.torso_cmd = 0.0
-        self.onscreen = False
-        self.preview = False
-        self.preview_free = os.path.exists(PREVIEW_FREE_FLAG)
+        self.preview_mode = "off"
+        self.preview_params = dict(Sim.FREE_DEFAULTS)
         self.preview_every = 2
         self._preview_tick = 0
         self._detector = None
@@ -116,8 +114,8 @@ class Sim:
     def _write_preview(self) -> None:
         """Publish a small frame for the external viewer window to display."""
         try:
-            if self.preview_free:
-                png = self._render("free", width=320, height=240)
+            if self.preview_mode == "third_person":
+                png = self._render_free(self.preview_params, 320, 240)
             else:
                 png = self._render(width=320, height=240)
             tmp = PREVIEW_PATH + ".tmp"
@@ -128,7 +126,7 @@ class Sim:
             pass
 
     def _after_step(self) -> None:
-        if not self.preview:
+        if self.preview_mode == "off":
             return
         self._preview_tick += 1
         if self._preview_tick % self.preview_every == 0:
@@ -137,19 +135,17 @@ class Sim:
     # Default third-person framing: look at the robot from front-left, pulled back.
     FREE_DEFAULTS = {"dist": 2.8, "az": 200.0, "el": -32.0}
 
-    @staticmethod
-    def _parse_free(spec: str) -> dict:
-        """Parse `free` or `free:dist=2.3,az=135,el=-28,lx=0.3,ly=-1.2,lz=1.0`."""
-        out = dict(Sim.FREE_DEFAULTS)
-        body = spec.split(":", 1)[1] if ":" in spec else ""
-        for chunk in body.split(","):
-            if "=" not in chunk:
-                continue
-            key, _, value = chunk.partition("=")
-            try:
-                out[key.strip()] = float(value)
-            except ValueError:
-                continue
+    def _normalize_free(self, params) -> dict:
+        """Accept tool-style keys (distance/azimuth/elevation/lookat) and map them."""
+        out = dict(self.FREE_DEFAULTS)
+        if not params:
+            return out
+        lookat = params.get("lookat")
+        if lookat is not None and len(lookat) == 3:
+            out["lx"], out["ly"], out["lz"] = (float(v) for v in lookat)
+        for src, dst in (("distance", "dist"), ("azimuth", "az"), ("elevation", "el")):
+            if params.get(src) is not None:
+                out[dst] = float(params[src])
         return out
 
     def _free_lookat(self, params: dict) -> np.ndarray:
@@ -176,13 +172,13 @@ class Sim:
         img = env.sim.render(width=width, height=height, camera_name=None, depth=False)
         return np.asarray(img)[::-1]
 
-    def _render(self, camera=None, width=None, height=None) -> bytes:
+    def _render(self, camera=None, width=None, height=None, free=None) -> bytes:
         env = self._require_env()
         camera = camera or self.camera
         width = int(width or self.width)
         height = int(height or self.height)
-        if str(camera).startswith("free"):
-            img = self._render_free(self._parse_free(str(camera)), width, height)
+        if free is not None:
+            img = self._render_free(free, width, height)
         else:
             img = env.sim.render(width=width, height=height, camera_name=camera, depth=False)
             img = np.asarray(img)[::-1]
@@ -220,17 +216,16 @@ class Sim:
         ls = [[int(layout), int(style)]] if layout is not None and style is not None else None
 
         t0 = time.time()
-        self.onscreen = bool(p.get("onscreen")) or os.environ.get("ROBOCASA_ONSCREEN") == "1" or os.path.exists(ONSCREEN_FLAG)
-        self.preview = (not self.onscreen) and (
-            bool(p.get("preview")) or os.environ.get("ROBOCASA_PREVIEW") == "1" or os.path.exists(PREVIEW_FLAG)
-        )
+        self.preview_mode = str(p.get("preview") or "off")
+        if self.preview_mode not in ("off", "shoulder", "third_person"):
+            self.preview_mode = "off"
         self.env = create_env(
             self.task,
             camera_names=[self.camera],
             camera_widths=self.width,
             camera_heights=self.height,
             seed=self.seed,
-            render_onscreen=self.onscreen,
+            render_onscreen=False,
             layout_and_style_ids=ls,
         )
         self.obs = self.env.reset()
@@ -238,11 +233,9 @@ class Sim:
         self.shot_index = 0
         self.torso_cmd = 0.0
         self._capture_snapshot()
-        if self.onscreen:
-            self.env.render()
-        if self.preview:
+        if self.preview_mode != "off":
             self._write_preview()
-        log(f"opened {self.task} seed={self.seed} onscreen={self.onscreen} in {time.time() - t0:.1f}s")
+        log(f"opened {self.task} seed={self.seed} preview={self.preview_mode} in {time.time() - t0:.1f}s")
         return {
             "task": self.task,
             "seed": self.seed,
@@ -250,7 +243,7 @@ class Sim:
             "action_dim": int(self.env.action_dim),
             "eef_pos": self._eef_pos(),
             "versions": _versions(),
-            "onscreen": self.onscreen,
+            "preview": self.preview_mode,
             "open_seconds": round(time.time() - t0, 2),
         }
 
@@ -260,8 +253,8 @@ class Sim:
         self.steps = 0
         self.torso_cmd = 0.0
         self._capture_snapshot()
-        if self.onscreen:
-            env.render()
+        if self.preview_mode != "off":
+            self._write_preview()
         return {"eef_pos": self._eef_pos(), "eef_quat": self._eef_quat(), "success": self._success()}
 
     def restart(self, p):
@@ -497,12 +490,36 @@ class Sim:
 
         return {"query": query, "found": bool(matches), "count": len(matches), "matches": matches}
 
+    def set_preview(self, p):
+        """Switch the preview window mode and framing at runtime."""
+        mode = str(p.get("mode", self.preview_mode))
+        if mode not in ("off", "shoulder", "third_person"):
+            raise ValueError(f"unknown preview mode: {mode!r}")
+        params = dict(self.preview_params)
+        if p.get("lookat") is not None:
+            lookat = [float(v) for v in p["lookat"]]
+            if len(lookat) != 3:
+                raise ValueError("lookat needs three numbers")
+            params["lx"], params["ly"], params["lz"] = lookat
+        for key in ("distance", "azimuth", "elevation"):
+            if p.get(key) is not None:
+                params[{"distance": "dist", "azimuth": "az", "elevation": "el"}[key]] = float(p[key])
+        self.preview_params = params
+        self.preview_mode = mode
+        if mode != "off":
+            self._write_preview()
+        return {"mode": self.preview_mode, "params": self.preview_params}
+
     def look(self, p):
-        png = self._render(p.get("camera"), p.get("width"), p.get("height"))
+        free = p.get("free")
+        png = self._render(
+            p.get("camera"), p.get("width"), p.get("height"),
+            free=self._normalize_free(free) if free is not None else None,
+        )
         path = self._save_shot(png)
         return {
             "path": path,
-            "camera": p.get("camera") or self.camera,
+            "camera": "free" if free is not None else (p.get("camera") or self.camera),
             "image_png_base64": base64.b64encode(png).decode("ascii"),
             "eef_pos": self._eef_pos(),
             "steps": self.steps,
@@ -518,8 +535,6 @@ class Sim:
         for _ in range(steps):
             self.obs, _, _, _ = env.step(action)
             self.steps += 1
-            if self.onscreen:
-                env.render()
             self._after_step()
         return {
             "steps": self.steps,
@@ -580,8 +595,6 @@ class Sim:
             self.obs, _, _, _ = env.step(action)
             self.steps += 1
             used += 1
-            if self.onscreen:
-                env.render()
             self._after_step()
         end = self._eef_pos()
         # Recompute from the final pose: the loop may exit before ever updating
@@ -643,8 +656,6 @@ class Sim:
             self.obs, _, _, _ = env.step(action)
             self.steps += 1
             used += 1
-            if self.onscreen:
-                env.render()
             self._after_step()
         end_quat = self._eef_quat()
         err = float(np.linalg.norm(_rotvec_from_mat(R_target @ _quat_to_mat(end_quat).T)))
@@ -943,6 +954,7 @@ METHODS = {
     "reset": Sim.reset,
     "restart": Sim.restart,
     "look": Sim.look,
+    "set_preview": Sim.set_preview,
     "act": Sim.act,
     "move": Sim.move,
     "locate": Sim.locate,
