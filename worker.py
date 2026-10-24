@@ -731,6 +731,20 @@ class Sim:
                 self._after_step()
         return len(traj) * 2
 
+    def _escape_targets(self, target):
+        """Back-off poses to try when the arm is wedged against something."""
+        cur = np.asarray(self._eef_pos(), dtype=np.float64)
+        delta = cur - np.asarray(target, dtype=np.float64)
+        norm = float(np.linalg.norm(delta))
+        out = []
+        if norm > 1e-6:
+            away = delta / norm
+            out.append(cur + away * 0.08)
+            out.append(cur + away * 0.14)
+        out.append(cur + np.array([0.0, 0.0, 0.10]))
+        out.append(cur + np.array([-0.08, 0.0, 0.06]))
+        return out
+
     def _plan_to(self, q_goal):
         """Plan from the live configuration to q_goal, ignoring what we carry."""
         self.checker.set_attached_geoms(self._held_geom_ids())
@@ -744,6 +758,8 @@ class Sim:
         env = self.env
         action = self._action(q_goal, gripper=gripper, torso=self.torso_cmd)
         used = 0
+        start_pos = np.asarray(self._eef_pos(), dtype=np.float64)
+        progress = 0.0
         residual = float(np.linalg.norm(np.asarray(target) - self._eef_pos()))
         rot_residual = 0.0
         for _ in range(max_steps):
@@ -752,12 +768,14 @@ class Sim:
             used += 1
             self._after_step()
             residual = float(np.linalg.norm(np.asarray(target, dtype=np.float64) - self._eef_pos()))
+            progress = max(progress, float(np.linalg.norm(
+                np.asarray(self._eef_pos(), dtype=np.float64) - start_pos)))
             if target_rot is not None:
                 R_now = _quat_to_mat(self.obs["robot0_eef_quat"])
                 rot_residual = float(np.linalg.norm(_rotvec_from_mat(target_rot @ R_now.T)))
             if residual <= tol and rot_residual <= rot_tol:
                 break
-        return used, residual, rot_residual
+        return used, residual, rot_residual, progress
 
     def move(self, p):
         """Inverse-kinematics move to a world-space pose under joint control."""
@@ -792,7 +810,7 @@ class Sim:
             }
 
         budget = min(max_steps, 25)
-        used, residual, rot_residual = self._servo(
+        used, residual, rot_residual, progress = self._servo(
             q_goal, gripper, budget, target, target_rot, tol, rot_tol
         )
         plan_info = None
@@ -802,10 +820,24 @@ class Sim:
                 # The detour gets its own budget: sharing it with the final servo
                 # used to consume every step and leave nothing to converge with.
                 used += self._follow(path, gripper)
-                u2, residual, rot_residual = self._servo(
+                u2, residual, rot_residual, _ = self._servo(
                     q_goal, gripper, max(40, max_steps), target, target_rot, tol, rot_tol
                 )
                 used += u2
+        recovered = False
+        if residual > tol and bool(p.get("recover", True)):
+            for escape in self._escape_targets(target):
+                self.move({
+                    "x": float(escape[0]), "y": float(escape[1]), "z": float(escape[2]),
+                    "gripper": gripper, "max_steps": 40, "recover": False, "plan": False,
+                })
+                u3, residual, rot_residual, _ = self._servo(
+                    q_goal, gripper, max(25, max_steps // 2), target, target_rot, tol, rot_tol
+                )
+                used += u3
+                if residual <= tol:
+                    recovered = True
+                    break
         failure = "ok"
         if residual > tol:
             error = (plan_info or {}).get("error")
@@ -819,6 +851,8 @@ class Sim:
             "planned": bool(plan_info and plan_info.get("nodes")),
             "plan": plan_info,
             "failure": failure,
+            "recovered": recovered,
+            "progress_m": _num(progress),
             "start": start,
             "target": [float(v) for v in target],
             "end": self._eef_pos(),
@@ -867,7 +901,7 @@ class Sim:
             }
 
         anchor = self._eef_pos()
-        used, _, rot_residual = self._servo(
+        used, _, rot_residual, _ = self._servo(
             q_goal, p.get("gripper"), max_steps, anchor, R_target, 0.05, tol
         )
         self._last_rot_debug = {

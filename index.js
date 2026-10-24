@@ -989,6 +989,10 @@ export function apply(ctx, config = {}) {
         value.planned && value.plan
           ? `Planned a detour: ${value.plan.nodes} nodes, ${value.plan.checks} collision checks, ${value.plan.seconds}s`
           : '',
+        value.recovered ? 'Recovered: backed off and reached the target.' : '',
+        value.failure && value.failure !== 'ok'
+          ? `Failure: ${value.failure}${value.progress_m !== undefined ? ` (arm travelled ${value.progress_m} m)` : ''}`
+          : '',
         `Task success: ${value.success}`,
       ].filter(Boolean).join('\n'))],
     },
