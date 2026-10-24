@@ -20,6 +20,31 @@ const DEFAULT_PYTHON = '/home/zhu/miniconda3/envs/robocasa/bin/python'
 
 const DEFAULT_TASK = 'PickPlaceCounterToCabinet'
 
+const SETTINGS_PATH = join(HERE, 'settings.json')
+const DEFAULT_SETTINGS = {
+  camera: 'robot0_agentview_left',
+  detectorThreshold: 0.15,
+  previewEvery: 2,
+  streamWidth: 320,
+  streamHeight: 240,
+}
+
+const readSettings = () => {
+  try {
+    return { ...DEFAULT_SETTINGS, ...JSON.parse(readFileSync(SETTINGS_PATH, 'utf8')) }
+  } catch {
+    return { ...DEFAULT_SETTINGS }
+  }
+}
+
+const writeSettings = (patch) => {
+  const next = { ...readSettings(), ...patch }
+  try {
+    writeFileSync(SETTINGS_PATH, JSON.stringify(next, null, 2))
+  } catch {}
+  return next
+}
+
 const PLUGIN_VERSION = (() => {
   try {
     return JSON.parse(readFileSync(join(HERE, 'package.json'), 'utf8')).version
@@ -365,7 +390,16 @@ export function apply(ctx, config = {}) {
   }
 
   /** MJPEG stream: one frame per request cycle, no state kept between clients. */
+  const clampInt = (value, fallback, min, max) => {
+    const parsed = Number(value)
+    if (!Number.isFinite(parsed)) return fallback
+    return Math.min(max, Math.max(min, Math.round(parsed)))
+  }
+
   const streamFrames = async (req, res) => {
+    const query = new URL(req.url ?? '/', 'http://localhost').searchParams
+    const width = clampInt(query.get('w'), readSettings().streamWidth, 160, 800)
+    const height = clampInt(query.get('h'), readSettings().streamHeight, 120, 600)
     res.writeHead(200, {
       'Content-Type': 'multipart/x-mixed-replace; boundary=frame',
       'Cache-Control': 'no-store, no-cache, must-revalidate',
@@ -376,7 +410,7 @@ export function apply(ctx, config = {}) {
     while (!closed) {
       let frame
       try {
-        frame = await worker.call('frame', { width: 320, height: 240 }, { timeoutMs: 5000 })
+        frame = await worker.call('frame', { width, height }, { timeoutMs: 5000 })
       } catch {
         await sleep(500)
         continue
@@ -409,6 +443,26 @@ export function apply(ctx, config = {}) {
       kind: 'exact',
       path: '/robocasa/frame.mjpg',
       handler: streamFrames,
+    }))
+    disposers.push(web.register({
+      kind: 'exact',
+      path: '/robocasa/settings',
+      handler: async (req, res) => {
+        if (req.method === 'POST') {
+          let body = ''
+          try {
+            for await (const chunk of req) body += chunk
+            const patch = body ? JSON.parse(body) : {}
+            const next = writeSettings(patch)
+            await worker.call('configure', next, { timeoutMs: 10_000 }).catch(() => undefined)
+            sendJson(res, next)
+          } catch (error) {
+            sendJson(res, { error: String(error?.message ?? error) }, 400)
+          }
+          return
+        }
+        sendJson(res, readSettings())
+      },
     }))
     disposers.push(web.register({
       kind: 'exact',
@@ -539,12 +593,22 @@ export function apply(ctx, config = {}) {
     isConcurrencySafe: () => false,
     async execute(args, exec) {
       const dir = startRun(args)
+      const settings = readSettings()
       const result = await worker.call(
         'open',
         { ...args, shots_dir: join(dir, 'frames') },
         { timeoutMs: 300_000, signal: exec.signal },
       )
       const status = await worker.call('status', {}, { timeoutMs: 30_000, signal: exec.signal })
+      await worker.call(
+        'configure',
+        {
+          camera: args.camera || settings.camera,
+          detectorThreshold: settings.detectorThreshold,
+          previewEvery: settings.previewEvery,
+        },
+        { timeoutMs: 10_000 },
+      ).catch(() => undefined)
       run.manifest.environment = result.versions || {}
       run.manifest.stats.steps = 0
       record('open', { task: result.task, seed: result.seed, camera: result.camera })

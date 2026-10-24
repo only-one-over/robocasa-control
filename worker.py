@@ -751,6 +751,33 @@ class Sim:
             "mode": self.preview_mode,
         }
 
+    def configure(self, p):
+        """Apply runtime settings; unknown keys are ignored."""
+        changed = {}
+        if p.get("detectorThreshold") is not None:
+            self.detector_threshold = float(p["detectorThreshold"])
+            changed["detectorThreshold"] = self.detector_threshold
+        if p.get("previewEvery") is not None:
+            self.preview_every = max(1, int(p["previewEvery"]))
+            changed["previewEvery"] = self.preview_every
+        if p.get("camera"):
+            self.camera = str(p["camera"])
+            changed["camera"] = self.camera
+        if p.get("detectorModel"):
+            self.detector_id = str(p["detectorModel"])
+            self._detector = None
+            changed["detectorModel"] = self.detector_id
+        return {"applied": changed}
+
+    def settings(self, p):
+        """Current runtime settings, for the UI to render."""
+        return {
+            "camera": self.camera,
+            "detectorThreshold": self.detector_threshold,
+            "previewEvery": self.preview_every,
+            "detectorModel": self.detector_id,
+        }
+
     def state(self, p):
         """Compact live state for the UI; safe to call when nothing is open."""
         if self.env is None:
@@ -981,6 +1008,8 @@ METHODS = {
     "status": Sim.status,
     "frame": Sim.frame,
     "state": Sim.state,
+    "configure": Sim.configure,
+    "settings": Sim.settings,
     "grasp": Sim.grasp,
     "close": Sim.close,
 }

@@ -6,8 +6,20 @@ window.__ModuleLoader__.load({
 
     const MONO = 'ui-monospace, SFMono-Regular, Menlo, monospace'
     const BORDER = '1px solid rgba(128, 128, 128, 0.35)'
+    const CAMERAS = [
+      'robot0_agentview_left',
+      'robot0_agentview_right',
+      'robot0_agentview_center',
+      'robot0_eye_in_hand',
+      'robot0_frontview',
+      'robot0_robotview',
+    ]
+    const RESOLUTIONS = [
+      [320, 240],
+      [480, 360],
+      [640, 480],
+    ]
 
-    /** Sidebar entry icon; the shell owns the button, this owns the artwork. */
     function RoboCasaIcon(props) {
       const size = props && props.size ? props.size : 20
       return h(
@@ -30,14 +42,6 @@ window.__ModuleLoader__.load({
         h('path', { d: 'M13 10l4-3' }),
         h('path', { d: 'M17 7l2-3M19 9l2-2' }),
         h('rect', { x: '3', y: '3', width: '4', height: '4', rx: '1' }),
-      )
-    }
-
-    function StatusRow(props) {
-      return h(
-        'div',
-        { style: { display: 'flex', gap: 12, flexWrap: 'wrap', fontSize: 12, opacity: 0.85 } },
-        props.children,
       )
     }
 
@@ -72,9 +76,39 @@ window.__ModuleLoader__.load({
       )
     }
 
-    /** Full monitor panel: live MJPEG, live state, preview mode buttons. */
+    function Field(props) {
+      return h(
+        'label',
+        { style: { display: 'flex', alignItems: 'center', gap: 8, fontSize: 12 } },
+        h('span', { style: { opacity: 0.75, minWidth: 84 } }, props.label),
+        props.children,
+      )
+    }
+
+    function Select(props) {
+      return h(
+        'select',
+        {
+          value: String(props.value),
+          onChange: (event) => props.onChange(event.target.value),
+          disabled: props.disabled,
+          style: {
+            font: 'inherit',
+            fontSize: 12,
+            padding: '2px 6px',
+            border: BORDER,
+            borderRadius: 6,
+            background: 'transparent',
+            color: 'inherit',
+          },
+        },
+        props.options.map(([value, label]) => h('option', { key: String(value), value: String(value) }, label)),
+      )
+    }
+
     function RoboCasaPanel() {
       const [state, setState] = React.useState(null)
+      const [settings, setSettings] = React.useState(null)
       const [error, setError] = React.useState(null)
 
       React.useEffect(() => {
@@ -99,6 +133,24 @@ window.__ModuleLoader__.load({
         }
       }, [])
 
+      React.useEffect(() => {
+        let alive = true
+        fetch('/robocasa/settings')
+          .then((response) => response.json())
+          .then((value) => { if (alive) setSettings(value) })
+          .catch(() => {})
+        return () => { alive = false }
+      }, [])
+
+      const patchSettings = (patch) => {
+        setSettings((current) => ({ ...(current || {}), ...patch }))
+        fetch('/robocasa/settings', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(patch),
+        }).catch(() => {})
+      }
+
       const setPreview = (mode) => {
         fetch('/robocasa/preview', {
           method: 'POST',
@@ -109,6 +161,61 @@ window.__ModuleLoader__.load({
 
       const open = Boolean(state && state.open)
       const fmt = (value) => (typeof value === 'number' ? value.toFixed(3) : '-')
+      const width = settings ? Number(settings.streamWidth) || 320 : 320
+      const height = settings ? Number(settings.streamHeight) || 240 : 240
+      const streamSrc = `/robocasa/frame.mjpg?w=${width}&h=${height}`
+
+      const config = settings
+        ? h(
+            'div',
+            { style: { display: 'flex', flexDirection: 'column', gap: 8, marginTop: 6 } },
+            h('div', { style: { fontSize: 12, opacity: 0.6, letterSpacing: '0.04em' } }, '设置'),
+            h(
+              Field,
+              { label: '画面分辨率' },
+              h(Select, {
+                value: `${width}x${height}`,
+                options: RESOLUTIONS.map(([w, hh]) => [`${w}x${hh}`, `${w}×${hh}`]),
+                onChange: (value) => {
+                  const [w, hh] = value.split('x').map(Number)
+                  patchSettings({ streamWidth: w, streamHeight: hh })
+                },
+              }),
+            ),
+            h(
+              Field,
+              { label: '默认相机' },
+              h(Select, {
+                value: settings.camera,
+                options: CAMERAS.map((name) => [name, name.replace('robot0_', '')]),
+                onChange: (value) => patchSettings({ camera: value }),
+              }),
+            ),
+            h(
+              Field,
+              { label: '检测阈值' },
+              h(Select, {
+                value: settings.detectorThreshold,
+                options: [0.05, 0.1, 0.15, 0.2, 0.3, 0.5].map((v) => [v, v.toFixed(2)]),
+                onChange: (value) => patchSettings({ detectorThreshold: Number(value) }),
+              }),
+            ),
+            h(
+              Field,
+              { label: '预览刷新' },
+              h(Select, {
+                value: settings.previewEvery,
+                options: [1, 2, 4, 8].map((v) => [v, `每 ${v} 步`]),
+                onChange: (value) => patchSettings({ previewEvery: Number(value) }),
+              }),
+            ),
+            h(
+              'div',
+              { style: { fontSize: 11, opacity: 0.55, fontFamily: MONO } },
+              '默认相机在下次打开场景时生效，其余立即生效',
+            ),
+          )
+        : null
 
       return h(
         'div',
@@ -136,13 +243,15 @@ window.__ModuleLoader__.load({
         ),
 
         h('img', {
-          src: '/robocasa/frame.mjpg',
+          key: streamSrc,
+          src: streamSrc,
           alt: 'RoboCasa live view',
-          width: 320,
-          height: 240,
+          width,
+          height,
           style: {
-            width: 320,
-            height: 240,
+            width,
+            height,
+            maxWidth: '100%',
             objectFit: 'cover',
             border: BORDER,
             borderRadius: 8,
@@ -152,31 +261,33 @@ window.__ModuleLoader__.load({
 
         open
           ? h(
-              React.Fragment,
-              null,
+              'div',
+              { style: { display: 'flex', gap: 12, flexWrap: 'wrap', fontSize: 12, opacity: 0.85 } },
+              h(Pill, null, `step ${state.steps}`),
+              h(Pill, null, `success ${String(state.success)}`),
               h(
-                StatusRow,
+                Pill,
                 null,
-                h(Pill, null, `step ${state.steps}`),
-                h(Pill, null, `success ${String(state.success)}`),
-                h(
-                  Pill,
-                  null,
-                  `eef ${fmt(state.eef_pos && state.eef_pos[0])}, ${fmt(state.eef_pos && state.eef_pos[1])}, ${fmt(state.eef_pos && state.eef_pos[2])}`,
-                ),
+                `eef ${fmt(state.eef_pos && state.eef_pos[0])}, ${fmt(state.eef_pos && state.eef_pos[1])}, ${fmt(state.eef_pos && state.eef_pos[2])}`,
               ),
             )
-          : h('div', { style: { fontSize: 12, opacity: 0.7, fontFamily: MONO } }, state ? '打开一个场景后这里会显示状态' : '读取状态中…'),
+          : h(
+              'div',
+              { style: { fontSize: 12, opacity: 0.7, fontFamily: MONO } },
+              state ? '打开一个场景后这里会显示状态' : '读取状态中…',
+            ),
 
         error ? h('div', { style: { fontSize: 12, color: '#d9534f' } }, error) : null,
 
         h(
           'div',
-          { style: { display: 'flex', gap: 8, flexWrap: 'wrap', marginTop: 4 } },
+          { style: { display: 'flex', gap: 8, flexWrap: 'wrap' } },
           h(Button, { active: open && state.preview === 'shoulder', onClick: () => setPreview('shoulder'), disabled: !open }, '肩载'),
           h(Button, { active: open && state.preview === 'third_person', onClick: () => setPreview('third_person'), disabled: !open }, '第三人称'),
           h(Button, { active: open && state.preview === 'off', onClick: () => setPreview('off'), disabled: !open }, '关闭'),
         ),
+
+        config,
       )
     }
 
