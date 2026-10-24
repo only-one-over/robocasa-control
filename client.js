@@ -212,42 +212,6 @@ window.__ModuleLoader__.load({
             ),
             h(
               Field,
-              { label: '浮窗视角' },
-              h(Select, {
-                value: settings.viewMode,
-                options: [['third_person', '第三人称'], ['shoulder', '肩载']],
-                onChange: (value) => patchSettings({ viewMode: value }),
-              }),
-            ),
-            h(
-              Field,
-              { label: '方位角' },
-              h(Select, {
-                value: settings.azimuth,
-                options: [0, 45, 90, 135, 180, 225, 270, 315].map((v) => [v, `${v}°`]),
-                onChange: (value) => patchSettings({ azimuth: Number(value) }),
-              }),
-            ),
-            h(
-              Field,
-              { label: '俯角' },
-              h(Select, {
-                value: settings.elevation,
-                options: [-15, -25, -32, -45, -62].map((v) => [v, `${v}°`]),
-                onChange: (value) => patchSettings({ elevation: Number(v) }),
-              }),
-            ),
-            h(
-              Field,
-              { label: '距离' },
-              h(Select, {
-                value: settings.distance,
-                options: [1.8, 2.2, 2.8, 3.6, 4.5].map((v) => [v, `${v} m`]),
-                onChange: (value) => patchSettings({ distance: Number(value) }),
-              }),
-            ),
-            h(
-              Field,
               { label: '检测阈值' },
               h(Select, {
                 value: settings.detectorThreshold,
@@ -381,11 +345,21 @@ window.__ModuleLoader__.load({
 
       React.useEffect(() => {
         let alive = true
-        fetch('/robocasa/settings')
-          .then((response) => response.json())
-          .then((value) => { if (alive) setSettings(value) })
-          .catch(() => {})
-        return () => { alive = false }
+        const tick = async () => {
+          try {
+            const response = await fetch('/robocasa/settings', { cache: 'no-store' })
+            const value = await response.json()
+            if (alive) setSettings(value)
+          } catch {
+            /* keep the last settings */
+          }
+        }
+        tick()
+        const timer = setInterval(tick, 2000)
+        return () => {
+          alive = false
+          clearInterval(timer)
+        }
       }, [])
 
       return [state, settings]
@@ -395,14 +369,26 @@ window.__ModuleLoader__.load({
     function RoboCasaFloat() {
       const [state, settings] = useRoboCasaData()
       const [expanded, setExpanded] = React.useState(true)
+      const [showControls, setShowControls] = React.useState(false)
       const [pos, setPos] = React.useState(null)
       const drag = React.useRef(null)
 
       const width = settings ? Number(settings.streamWidth) || 240 : 240
       const height = settings ? Number(settings.streamHeight) || 180 : 180
-      const scale = Math.min(1, 240 / width)
+      // Follow the configured resolution, capped so the popup still fits a screen.
+      const scale = Math.min(1, 480 / width)
       const showWidth = Math.round(width * scale)
       const showHeight = Math.round(height * scale)
+
+      const patchSettings = (patch) => {
+        fetch('/robocasa/settings', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(patch),
+        }).then((response) => response.json())
+          .then((value) => setSettings(value))
+          .catch(() => {})
+      }
 
       const onPointerDown = (event) => {
         const box = event.currentTarget.parentElement.getBoundingClientRect()
@@ -509,9 +495,75 @@ window.__ModuleLoader__.load({
             ),
         h(
           'div',
-          { style: { padding: '4px 8px', fontSize: 11, fontFamily: MONO, opacity: 0.8 } },
-          open ? `step ${state.steps} · ${state.success ? 'success' : 'running'}` : '打开场景后显示画面',
+          {
+            style: {
+              display: 'flex',
+              alignItems: 'center',
+              justifyContent: 'space-between',
+              gap: 6,
+              padding: '3px 8px',
+              fontSize: 11,
+              fontFamily: MONO,
+              opacity: 0.85,
+            },
+          },
+          h('span', null, open ? `step ${state.steps} · ${state.success ? 'success' : 'running'}` : '未打开场景'),
+          settings
+            ? h(
+                'button',
+                {
+                  type: 'button',
+                  onClick: () => setShowControls((value) => !value),
+                  title: '视角设置',
+                  style: {
+                    background: 'transparent',
+                    border: 0,
+                    color: 'inherit',
+                    cursor: 'pointer',
+                    fontSize: 12,
+                    padding: 0,
+                  },
+                },
+                showControls ? '×' : '⚙',
+              )
+            : null,
         ),
+
+        showControls && settings
+          ? h(
+              'div',
+              {
+                style: {
+                  display: 'grid',
+                  gridTemplateColumns: '1fr 1fr',
+                  gap: 4,
+                  padding: '4px 8px 6px',
+                  fontSize: 11,
+                  fontFamily: MONO,
+                },
+              },
+              h(Select, {
+                value: settings.viewMode,
+                options: [['third_person', '第三人称'], ['shoulder', '肩载']],
+                onChange: (value) => patchSettings({ viewMode: value }),
+              }),
+              h(Select, {
+                value: settings.azimuth,
+                options: [0, 45, 90, 135, 180, 225, 270, 315].map((v) => [v, `方位 ${v}°`]),
+                onChange: (value) => patchSettings({ azimuth: Number(value) }),
+              }),
+              h(Select, {
+                value: settings.elevation,
+                options: [-15, -25, -32, -45, -62].map((v) => [v, `俯角 ${v}°`]),
+                onChange: (value) => patchSettings({ elevation: Number(v) }),
+              }),
+              h(Select, {
+                value: settings.distance,
+                options: [1.8, 2.2, 2.8, 3.6, 4.5].map((v) => [v, `距离 ${v}m`]),
+                onChange: (value) => patchSettings({ distance: Number(v) }),
+              }),
+            )
+          : null,
       )
     }
 
