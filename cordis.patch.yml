@@ -4,4 +4,4 @@
 # under that same directory. Override them here only when the defaults are wrong.
 - insert:
     - id: robocasa-control
-      name: '@local/robocasa-control'
+      name: 'robocasa-control'
