@@ -29,6 +29,7 @@ import numpy as np
 ONSCREEN_FLAG = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".onscreen")
 PREVIEW_FLAG = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".preview")
 PREVIEW_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "preview.png")
+PREVIEW_FREE_FLAG = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".preview_free")
 
 _PROTO_FD = os.dup(1)
 os.dup2(2, 1)
@@ -60,6 +61,7 @@ class Sim:
         self.torso_cmd = 0.0
         self.onscreen = False
         self.preview = False
+        self.preview_free = os.path.exists(PREVIEW_FREE_FLAG)
         self.preview_every = 2
         self._preview_tick = 0
         self._detector = None
@@ -114,7 +116,10 @@ class Sim:
     def _write_preview(self) -> None:
         """Publish a small frame for the external viewer window to display."""
         try:
-            png = self._render(width=320, height=240)
+            if self.preview_free:
+                png = self._render("free", width=320, height=240)
+            else:
+                png = self._render(width=320, height=240)
             tmp = PREVIEW_PATH + ".tmp"
             with open(tmp, "wb") as fh:
                 fh.write(png)
@@ -129,13 +134,58 @@ class Sim:
         if self._preview_tick % self.preview_every == 0:
             self._write_preview()
 
+    # Default third-person framing: look at the robot from front-left, pulled back.
+    FREE_DEFAULTS = {"dist": 2.8, "az": 200.0, "el": -32.0}
+
+    @staticmethod
+    def _parse_free(spec: str) -> dict:
+        """Parse `free` or `free:dist=2.3,az=135,el=-28,lx=0.3,ly=-1.2,lz=1.0`."""
+        out = dict(Sim.FREE_DEFAULTS)
+        body = spec.split(":", 1)[1] if ":" in spec else ""
+        for chunk in body.split(","):
+            if "=" not in chunk:
+                continue
+            key, _, value = chunk.partition("=")
+            try:
+                out[key.strip()] = float(value)
+            except ValueError:
+                continue
+        return out
+
+    def _free_lookat(self, params: dict) -> np.ndarray:
+        if all(k in params for k in ("lx", "ly", "lz")):
+            return np.array([params["lx"], params["ly"], params["lz"]], dtype=np.float64)
+        eef = self._eef_pos()
+        return np.asarray(eef if eef else [0.0, 0.0, 1.0], dtype=np.float64)
+
+    def _render_free(self, params: dict, width: int, height: int) -> np.ndarray:
+        env = self._require_env()
+        ctx = env.sim._render_context_offscreen
+        if ctx is None:
+            raise RuntimeError("no offscreen render context; free camera needs offscreen rendering")
+        import mujoco  # noqa: PLC0415
+
+        # render() only switches cam.type when a camera_id is passed, so a None
+        # camera keeps the previous fixed camera. Force the free camera here.
+        ctx.cam.type = mujoco.mjtCamera.mjCAMERA_FREE
+        ctx.cam.fixedcamid = -1
+        ctx.cam.lookat[:] = self._free_lookat(params)
+        ctx.cam.distance = float(params["dist"])
+        ctx.cam.azimuth = float(params["az"])
+        ctx.cam.elevation = float(params["el"])
+        img = env.sim.render(width=width, height=height, camera_name=None, depth=False)
+        return np.asarray(img)[::-1]
+
     def _render(self, camera=None, width=None, height=None) -> bytes:
         env = self._require_env()
         camera = camera or self.camera
         width = int(width or self.width)
         height = int(height or self.height)
-        img = env.sim.render(width=width, height=height, camera_name=camera, depth=False)
-        img = np.asarray(img)[::-1]
+        if str(camera).startswith("free"):
+            img = self._render_free(self._parse_free(str(camera)), width, height)
+        else:
+            img = env.sim.render(width=width, height=height, camera_name=camera, depth=False)
+            img = np.asarray(img)[::-1]
         if img.dtype != np.uint8:
             img = img.astype(np.uint8)
         from PIL import Image

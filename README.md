@@ -173,6 +173,38 @@ pip install --index-url https://download.pytorch.org/whl/cu128 torch==2.7.1+cu12
 
 worker 会自动选择 `cuda` 并切到 fp16；没有 GPU 时退回 CPU。
 
+## 自由相机
+
+`robocasa_look` 的 `camera` 参数除了命名相机，还接受自由视角：
+
+```
+free                                   # 默认第三人称（距离 2.8、方位 200°、俯角 -32°）
+free:az=45,el=-40,dist=2.8             # 任意角度
+free:lx=0.3,ly=-1.2,lz=1.0,dist=1.5    # 指定观察点 + 距离
+```
+
+参数含义：`az` 绕竖直轴方位角、`el` 俯仰角（负值向下）、`dist` 距离、`lx/ly/lz` 观察点世界坐标
+（省略时看向末端执行器）。
+
+实现细节：robosuite 的 `sim.render(camera_name=None)` **不会**自己切成自由相机——它只在传入
+`camera_id` 时改 `cam.type`。所以 worker 显式设置 `mjCAMERA_FREE` 再渲染。
+
+**限制**：自由相机没有命名相机的内参矩阵，视觉检测（`backend="vision"`）目前只支持命名相机。
+
+## 预览窗口的两种模式
+
+| 模式 | 开关 | 效果 |
+|---|---|---|
+| 肩载视角（默认） | 删除 `.preview_free` | 跟着机器人左肩 |
+| **第三人称全景** | `touch .preview_free` | 看整个厨房 + 机器人 |
+
+窗口建议用 systemd 用户服务启动，避免被宿主进程组回收：
+
+```bash
+systemd-run --user --collect --unit=robocasa-viewer --setenv=DISPLAY=:1 \
+  /path/to/python /path/to/viewer.py
+```
+
 ## 物体尺寸
 
 `open` 与 `status` 会同时给出物体的**世界坐标**与**包围盒尺寸**（米）。尺寸用于决定抓取下探深度与夹爪朝向，
