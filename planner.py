@@ -294,18 +294,21 @@ class Planner:
 
     def _plan_inner(self, q_start, q_goal, max_iters, step, check_step):
         t0 = time.time()
+        start_checks = self.checker.checks
         q_start = np.asarray(q_start, dtype=float)
         q_goal = np.asarray(q_goal, dtype=float)
         info = {"checks": 0, "tree_a": 0, "tree_b": 0, "iters": 0}
 
         if self.checker.in_collision(q_start):
-            return None, {**info, "error": "start in collision", "checks": self.checker.checks}
+            return None, {**info, "error": "start in collision",
+                          "checks": self.checker.checks - start_checks}
         if self.checker.in_collision(q_goal):
-            return None, {**info, "error": "goal in collision", "checks": self.checker.checks}
+            return None, {**info, "error": "goal in collision",
+                          "checks": self.checker.checks - start_checks}
         if self.checker.segment_free(q_start, q_goal, check_step):
             return [q_start, q_goal], {
                 **info, "nodes": 2, "seconds": round(time.time() - t0, 3),
-                "checks": self.checker.checks, "direct": True,
+                "checks": self.checker.checks - start_checks, "direct": True,
             }
 
         tree_a = [(q_start, -1)]
@@ -328,7 +331,7 @@ class Planner:
                     path = self._shortcut(path, check_step)
                     return path, {
                         "nodes": len(path), "iters": iteration + 1,
-                        "checks": self.checker.checks,
+                        "checks": self.checker.checks - start_checks,
                         "seconds": round(time.time() - t0, 3), "direct": False,
                         "tree_a": len(tree_a), "tree_b": len(tree_b),
                     }
@@ -336,7 +339,7 @@ class Planner:
             a_is_start = not a_is_start
             info["iters"] = iteration + 1
 
-        return None, {**info, "error": "no path", "checks": self.checker.checks,
+        return None, {**info, "error": "no path", "checks": self.checker.checks - start_checks,
                       "seconds": round(time.time() - t0, 3)}
 
     def _nearest(self, tree, q):

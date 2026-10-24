@@ -96,6 +96,7 @@ class Sim:
         self.shot_index = 0
         self._snapshot = None
         self.torso_cmd = 0.0
+        self.held_object = None
         self.preview_mode = "off"
         self.stream_on = False
         self.preview_size = (320, 240)
@@ -279,6 +280,7 @@ class Sim:
         )
         self.obs = self.env.reset()
         self._bind_robot()
+        self.held_object = None
         self._settle_home()
         self.steps = 0
         self.shot_index = 0
@@ -337,12 +339,19 @@ class Sim:
             action[self.base_slice[0] + 2] = float(base[2])
         return action
 
+    def _capture_home_orientation(self) -> None:
+        """Remember the downward grasp orientation of the home pose."""
+        rot = _quat_to_mat(self.obs["robot0_eef_quat"])
+        self.home_rot = rot
+        self.home_yaw = _yaw_of_mat(rot)
+
     def _settle_home(self, steps: int = 18) -> None:
         """Return to the robot's initial pose: absolute joint control starts at zero."""
         action = self._action(self.home_q, torso=0.0)
         for _ in range(steps):
             self.obs, _, _, _ = self.env.step(action)
         self.torso_cmd = 0.0
+        self._capture_home_orientation()
 
     def reset(self, p):
         env = self._require_env()
@@ -648,6 +657,8 @@ class Sim:
         base = None
         if any(k in p for k in ("forward", "side", "yaw")):
             base = (p.get("forward", 0.0), p.get("side", 0.0), p.get("yaw", 0.0))
+        if str(p.get("gripper", "")).lower() in ("open", "opened", "-1"):
+            self.held_object = None
         action = self._action(gripper=p.get("gripper"), torso=self.torso_cmd, base=base)
         for _ in range(steps):
             self.obs, _, _, _ = env.step(action)
@@ -661,9 +672,20 @@ class Sim:
         }
 
     def _target_rot(self, p):
-        """Resolve an absolute orientation target from quat or yaw_deg."""
+        """Resolve an absolute orientation target from quat or yaw_deg.
+
+        With top_down the orientation is the home pose's downward grasp pose
+        rotated to the requested yaw, so it does not depend on where the arm
+        happens to point now: deriving it from the current orientation makes a
+        failed attempt leave the next target unreachable.
+        """
         if p.get("quat"):
             return _quat_to_mat(p["quat"])
+        if p.get("yaw_deg") is not None and p.get("top_down") and getattr(self, "home_rot", None) is not None:
+            delta = np.radians(float(p["yaw_deg"])) - self.home_yaw
+            delta = (delta + np.pi / 2) % np.pi - np.pi / 2
+            c, s = np.cos(delta), np.sin(delta)
+            return np.array([[c, -s, 0.0], [s, c, 0.0], [0.0, 0.0, 1.0]]) @ self.home_rot
         if p.get("yaw_deg") is not None:
             R_now = _quat_to_mat(self.obs["robot0_eef_quat"])
             delta = np.radians(float(p["yaw_deg"])) - _yaw_of_mat(R_now)
@@ -675,29 +697,39 @@ class Sim:
         return None
 
     def _held_geom_ids(self):
-        """Geoms of any object currently inside the gripper, so planning ignores it."""
+        """Geoms of the object the gripper is actually holding.
+
+        Contacts are not a reliable signal: the fingers touch the object during
+        every approach, and an object resting on the counter then looks attached
+        to the robot, which makes planning reject the grasp pose as colliding
+        with the counter. The worker records what it grasped instead, and clears
+        it when the gripper opens or a drop releases.
+        """
         env = self.env
+        name = self.held_object
+        if not name:
+            return []
+        body_id = getattr(env, "obj_body_id", {}).get(name)
+        if body_id is None:
+            return []
         model = self.robot_model.model
-        eef = np.asarray(self._eef_pos(), dtype=np.float64)
-        ids = []
-        for body_id in getattr(env, "obj_body_id", {}).values():
-            pos = np.asarray(env.sim.data.body_xpos[body_id], dtype=np.float64)
-            if float(np.linalg.norm(pos - eef)) > 0.13:
-                continue
-            start = int(model.body_geomadr[body_id])
-            count = int(model.body_geomnum[body_id])
-            ids.extend(range(start, start + count))
-        return ids
+        start = int(model.body_geomadr[body_id])
+        count = int(model.body_geomnum[body_id])
+        return list(range(start, start + count))
 
     def _follow(self, path, gripper, qd_max: float = 1.0) -> int:
         """Drive the arm along a joint-space path, one control step per waypoint."""
         traj = time_parameterise(path, dt=0.05, qd_max=qd_max)
+        # Two control steps per waypoint: a single step leaves the arm trailing the
+        # commanded path by ~0.06 rad, which is enough to clip obstacles in tight
+        # spaces even though the planned path itself is collision free.
         for q_cmd in traj:
             action = self._action(q_cmd, gripper=gripper, torso=self.torso_cmd)
-            self.obs, _, _, _ = self.env.step(action)
-            self.steps += 1
-            self._after_step()
-        return len(traj)
+            for _ in range(2):
+                self.obs, _, _, _ = self.env.step(action)
+                self.steps += 1
+                self._after_step()
+        return len(traj) * 2
 
     def _plan_to(self, q_goal):
         """Plan from the live configuration to q_goal, ignoring what we carry."""
@@ -754,6 +786,7 @@ class Sim:
                 "steps_used": 0,
                 "total_steps": self.steps,
                 "ik_failed": True,
+                "failure": "ik_failed",
                 "ik": ik_info,
                 "success": self._success(),
             }
@@ -773,9 +806,19 @@ class Sim:
                     q_goal, gripper, max(40, max_steps), target, target_rot, tol, rot_tol
                 )
                 used += u2
+        failure = "ok"
+        if residual > tol:
+            error = (plan_info or {}).get("error")
+            if error == "goal in collision":
+                failure = "goal_in_collision"
+            elif error == "no path":
+                failure = "no_path"
+            else:
+                failure = "servo_stalled"
         return {
             "planned": bool(plan_info and plan_info.get("nodes")),
             "plan": plan_info,
+            "failure": failure,
             "start": start,
             "target": [float(v) for v in target],
             "end": self._eef_pos(),
@@ -844,6 +887,88 @@ class Sim:
             "debug": getattr(self, "_last_rot_debug", None),
         }
 
+    def plan(self, p):
+        """Plan a collision-free joint path to a pose without moving the arm."""
+        self._require_env()
+        target = np.array([float(p["x"]), float(p["y"]), float(p["z"])], dtype=np.float64)
+        target_rot = self._target_rot(p)
+        q_goal, ik_info = self.robot_model.ik_multi(
+            target, target_rot=target_rot, iters=300, tries=24, collect=6,
+            margin=0.10, seed=self.steps,
+        )
+        if q_goal is None:
+            return {"ok": False, "failure": "ik_failed", "ik": ik_info}
+        path, info = self._plan_to(q_goal)
+        if path is None:
+            error = info.get("error", "no path")
+            return {
+                "ok": False,
+                "failure": "goal_in_collision" if error == "goal in collision" else "no_path",
+                "plan": info,
+                "ik": ik_info,
+            }
+        return {
+            "ok": True,
+            "nodes": len(path),
+            "direct": bool(info.get("direct")),
+            "seconds": info.get("seconds"),
+            "checks": info.get("checks"),
+            "travel_m": _num(float(np.sum([np.linalg.norm(b - a_) for a_, b in zip(path[:-1], path[1:])]))),
+            "ik": ik_info,
+            "target": [float(v) for v in target],
+        }
+
+    def drop(self, p):
+        """Carry the held object above a point and release it there.
+
+        Some receptacles (a sink, a bin) sit below the lowest pose the wrist can
+        reach; releasing from just above is the only way to get the object in.
+        """
+        self._require_env()
+        target = np.array([float(p["x"]), float(p["y"]), float(p["z"])], dtype=np.float64)
+        lift = float(p.get("height", 0.02))
+        approach = target.copy()
+        approach[2] = max(target[2], target[2] + lift)
+        moved = self.move({
+            "x": float(approach[0]),
+            "y": float(approach[1]),
+            "z": float(approach[2]),
+            "gripper": "close",
+            "max_steps": int(p.get("max_steps", 90)),
+            # A drop only needs the object roughly over the receptacle; demanding
+            # the usual 1.5 cm would abort on a perfectly good release point.
+            "tol": float(p.get("tol", 0.02)),
+        })
+        failure = moved.get("failure")
+        if failure not in (None, "ok"):
+            # Never release on a failed approach: the object would be dropped
+            # wherever the arm happened to stall, which is usually mid air.
+            return {
+                "released": False,
+                "failure": failure,
+                "residual_m": moved.get("residual_m"),
+                "approach": [float(v) for v in approach],
+                "objects": _object_positions(self.env),
+                "eef_pos": self._eef_pos(),
+                "success": self._success(),
+            }
+        self.held_object = None
+        self.act({"gripper": "open", "steps": int(p.get("release_steps", 20))})
+        for _ in range(int(p.get("settle_steps", 25))):
+            action = self._action(gripper="open", torso=self.torso_cmd)
+            self.obs, _, _, _ = self.env.step(action)
+            self.steps += 1
+            self._after_step()
+        return {
+            "released": True,
+            "approach": [float(v) for v in approach],
+            "residual_m": moved.get("residual_m"),
+            "failure": moved.get("failure"),
+            "objects": _object_positions(self.env),
+            "eef_pos": self._eef_pos(),
+            "success": self._success(),
+        }
+
     def grasp(self, p):
         """Multi-hypothesis grasp: try several yaw offsets, keep the one that lifts.
 
@@ -882,23 +1007,23 @@ class Sim:
             # Approach from high up first: a straight reach from the home pose
             # often jams against the counter edge and never descends.
             hover = max(1.30, float(target[2]) + 0.25)
-            self.move({"x": float(target[0]), "y": float(target[1]), "z": hover,
+            self.move({"x": float(target[0]), "y": float(target[1]), "z": hover, "top_down": True,
                        "yaw_deg": yaw, "gripper": "open", "max_steps": 70})
             pre = self.move({"x": float(target[0]), "y": float(target[1]), "z": float(target[2] + 0.10),
-                             "yaw_deg": yaw, "gripper": "open", "max_steps": 90, "tol": 0.015})
+                             "top_down": True, "yaw_deg": yaw, "gripper": "open", "max_steps": 90, "tol": 0.015})
             down = self.move({"x": float(target[0]), "y": float(target[1]), "z": float(target[2]),
-                              "yaw_deg": yaw, "gripper": "open", "max_steps": 60, "tol": 0.012})
+                              "top_down": True, "yaw_deg": yaw, "gripper": "open", "max_steps": 60, "tol": 0.012})
 
             # A straight descent sometimes jams against a fixture; approach from
             # the side instead of pushing harder.
             if retry_stalls and (down.get("residual_m") or 0) > 0.04:  # noqa: E501
                 self.move({"x": float(target[0] - 0.09), "y": float(target[1]), "z": float(target[2] + 0.14),
-                           "yaw_deg": yaw, "gripper": "open", "max_steps": 60})
+                           "top_down": True, "yaw_deg": yaw, "gripper": "open", "max_steps": 60})
                 down = self.move({"x": float(target[0]), "y": float(target[1]), "z": float(target[2]),
-                                  "yaw_deg": yaw, "gripper": "open", "max_steps": 60, "tol": 0.012})
+                                  "top_down": True, "yaw_deg": yaw, "gripper": "open", "max_steps": 60, "tol": 0.012})
             self.act({"gripper": "close", "steps": 15})
             up = self.move({"x": float(target[0]), "y": float(target[1]), "z": float(target[2] + lift),
-                            "yaw_deg": yaw, "gripper": "close", "max_steps": 50})
+                            "top_down": True, "yaw_deg": yaw, "gripper": "close", "max_steps": 50})
             z1 = float(env.sim.data.body_xpos[body][2])
             delta = _num(z1 - z0)
             attempts.append({
@@ -911,6 +1036,7 @@ class Sim:
                 "success": bool(delta > 0.02),
             })
             if delta > 0.02:
+                self.held_object = verify
                 return {"success": True, "attempts": attempts, "grasp": [float(v) for v in target],
                         "yaw_deg": round(yaw, 1), "object": verify}
             self.act({"gripper": "open", "steps": 10})
@@ -1174,6 +1300,8 @@ METHODS = {
     "rotate": Sim.rotate,
     "status": Sim.status,
     "frame": Sim.frame,
+    "plan": Sim.plan,
+    "drop": Sim.drop,
     "state": Sim.state,
     "set_streaming": Sim.set_streaming,
     "jog": Sim.jog,

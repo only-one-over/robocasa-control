@@ -494,6 +494,35 @@ export function apply(ctx, config = {}) {
     return rows
   }
 
+  /** Kill worker.py processes left behind by earlier plugin generations.
+
+  They are children of this host process (a reload drops the reference but not
+  the child), so matching on the parent pid keeps the sweep to our own orphans.
+  */
+  const reapOrphans = () => {
+    let entries = []
+    try {
+      entries = readdirSync('/proc').filter((name) => /^\d+$/.test(name))
+    } catch {
+      return []
+    }
+    const reaped = []
+    for (const name of entries) {
+      const pid = Number(name)
+      if (pid === worker.pid) continue
+      try {
+        const stat = readFileSync(`/proc/${pid}/stat`, 'utf8')
+        const ppid = Number(stat.slice(stat.lastIndexOf(')') + 2).split(' ')[1])
+        if (ppid !== process.pid) continue
+        const cmd = readFileSync(`/proc/${pid}/cmdline`, 'utf8').replace(/\0/g, ' ')
+        if (!cmd.includes(WORKER_MARK)) continue
+        process.kill(pid, 'SIGKILL')
+        reaped.push(pid)
+      } catch {}
+    }
+    return reaped
+  }
+
   const closeWorker = (pid) => {
     let cmd = ''
     try {
@@ -518,6 +547,14 @@ export function apply(ctx, config = {}) {
     }, 2000)
     return { ok: true, pid, owned: false }
   }
+
+  // Sweep stragglers once the plugin has settled: a reload during a tool call
+  // can leave a worker whose parent is still this host process.
+  const reaper = setTimeout(() => {
+    const reaped = reapOrphans()
+    if (reaped.length) console.error(`[robocasa] reaped orphan workers: ${reaped.join(', ')}`)
+  }, 4000)
+  ctx.effect(() => () => clearTimeout(reaper))
 
   const web = ctx.get('webServer')
   if (web) {
@@ -899,10 +936,14 @@ export function apply(ctx, config = {}) {
   disposers.push(ctx.tools.register({
     name: 'robocasa_move',
     description:
-      'Move the robot end effector to a world-space target (x, y, z) using a closed-loop proportional controller, '
-      + 'optionally rotating to an absolute orientation given by yaw_deg or a full quaternion. '
+      'Move the end effector to a world-space target (x, y, z), optionally to an absolute orientation given by '
+      + 'yaw_deg or a full quaternion. The pose is resolved by inverse kinematics and the arm is driven to that '
+      + 'joint configuration. If the direct approach stalls, a collision-free detour is planned automatically and '
+      + 'followed, so a residual near zero means the arm physically got there. '
       + 'This is the main manipulation primitive: drive toward an object, close the gripper, then lift by moving up. '
-      + 'Returns the residual distance; if it is above the tolerance, call again with a nearer target or more steps.',
+      + 'A non-zero residual means the pose is blocked or unreachable: read the failure field (ik_failed, '
+      + 'goal_in_collision, no_path, servo_stalled) before retrying with a nearer target, a different approach '
+      + 'direction, or a base move.',
     parameters: {
       type: 'object',
       properties: {
@@ -920,6 +961,12 @@ export function apply(ctx, config = {}) {
           type: 'number',
           description: 'Absolute yaw in degrees about the world z axis, keeping the current pitch and roll. '
             + 'Positive is counter-clockwise seen from above.',
+        },
+        top_down: {
+          type: 'boolean',
+          description: 'Interpret yaw_deg against the home pose downward grasp orientation instead of the current '
+            + 'one. Use it for grasping: deriving the target from the current orientation makes a failed attempt '
+            + 'leave the next target unreachable.',
         },
         quat: {
           type: 'array',
@@ -997,9 +1044,12 @@ export function apply(ctx, config = {}) {
   disposers.push(ctx.tools.register({
     name: 'robocasa_act',
     description:
-      'Apply a raw end-effector translation delta for N simulation steps. Use it for small corrections or for '
-      + 'nudging the base when out of reach. Values are normalized controller inputs: about 1.0 means roughly '
-      + '5 cm per step. For rotation, use robocasa_rotate instead.',
+      'Apply a small relative end-effector translation, or drive the mobile base and torso. '
+      + 'dx/dy/dz are metres and are resolved through inverse kinematics like robocasa_move, so the arm moves '
+      + 'once and then holds; they are not per-step velocities. forward/side/yaw are normalized base velocities '
+      + 'held for the whole step count, and torso is a normalized height command. '
+      + 'Use it to nudge the base when a target is out of reach, or to hold the gripper while stepping. '
+      + 'For rotation, use robocasa_rotate instead.',
     parameters: {
       type: 'object',
       properties: {
@@ -1041,12 +1091,116 @@ export function apply(ctx, config = {}) {
   }))
 
   disposers.push(ctx.tools.register({
+    name: 'robocasa_plan',
+    description:
+      'Plan a collision-free joint path to a pose without moving the arm. Returns whether a path exists, '
+      + 'how many waypoints it has, whether it is a straight shot or a detour, the number of collision checks '
+      + 'and the joint-space length. Use it to diagnose why a move fails before spending steps on it: '
+      + 'failure ik_failed means the pose is out of reach, goal_in_collision means the pose itself is blocked, '
+      + 'and no_path means it is reachable but no route through the scene was found.',
+    parameters: {
+      type: 'object',
+      properties: {
+        x: { type: 'number', description: 'Target world x coordinate.' },
+        y: { type: 'number', description: 'Target world y coordinate.' },
+        z: { type: 'number', description: 'Target world z coordinate.' },
+        yaw_deg: { type: 'number', description: 'Optional absolute yaw about world z, in degrees.' },
+        quat: {
+          type: 'array',
+          items: { type: 'number' },
+          description: 'Optional absolute end-effector orientation as [x, y, z, w]; overrides yaw_deg.',
+        },
+      },
+      required: ['x', 'y', 'z'],
+      additionalProperties: false,
+    },
+    output: {
+      schema: { type: 'object', additionalProperties: true },
+      render: (_args, value) => [text(
+        value.ok
+          ? [
+              `Path found: ${value.nodes} waypoints (${value.direct ? 'direct' : 'detour'}).`,
+              `Collision checks: ${value.checks}, planning ${value.seconds}s, joint travel ${value.travel_m} rad.`,
+              poseLine('Target', value.target),
+            ].join('\n')
+          : [
+              `No path: ${value.failure}.`,
+              value.ik ? `IK residual: ${value.ik.residual} m, rot ${value.ik.rot_residual ?? 'n/a'} rad` : '',
+              value.plan ? `Planner: ${value.plan.error || 'unknown'}` : '',
+            ].filter(Boolean).join('\n'),
+      )],
+    },
+    timeoutMs: 120_000,
+    isConcurrencySafe: () => true,
+    async execute(args, exec) {
+      const value = await worker.call('plan', args, { timeoutMs: 120_000, signal: exec.signal })
+      record('plan', { ok: value.ok, failure: value.failure })
+      return value
+    },
+  }))
+
+  disposers.push(ctx.tools.register({
+    name: 'robocasa_drop',
+    description:
+      'Carry the held object above a point and release it there. Use it for receptacles that sit below the '
+      + 'lowest pose the wrist can reach: the sink basin is 18 cm below the counter and the hand blocks on the '
+      + 'rim, so lowering all the way is impossible while dropping from just above works. '
+      + 'Pass x/y at the middle of the receptacle and z at its OPENING, not its bottom: the wrist cannot go '
+      + 'below roughly 0.99 m, and releasing much higher lets long objects bounce off the rim. '
+      + 'If the approach fails the gripper stays closed and nothing is released.',
+    parameters: {
+      type: 'object',
+      properties: {
+        x: { type: 'number', description: 'World x of the release point.' },
+        y: { type: 'number', description: 'World y of the release point.' },
+        z: { type: 'number', description: 'World z of the release point.' },
+        height: {
+          type: 'number',
+          description: 'How far above the point to hold before releasing, in metres (default 0.02).',
+          default: 0.02,
+        },
+        max_steps: { type: 'number', description: 'Maximum steps for the approach move (default 90).', default: 90 },
+      },
+      required: ['x', 'y', 'z'],
+      additionalProperties: false,
+    },
+    output: {
+      schema: { type: 'object', additionalProperties: true },
+      render: (_args, value) => [text(
+        value.released
+          ? [
+              `Released above ${poseLine('point', value.approach)}`,
+              `Approach residual: ${value.residual_m} m`,
+              `Task success: ${value.success}`,
+            ].join('\n')
+          : [
+              `Not released: the approach failed (${value.failure}, residual ${value.residual_m} m).`,
+              `The object is still in the gripper. Retry with a higher z: the wrist cannot reach`
+                + ` below roughly 0.99 m, so aim at the rim, not the bottom.`,
+            ].join('\n'),
+      )],
+    },
+    timeoutMs: 180_000,
+    isConcurrencySafe: () => false,
+    async execute(args, exec) {
+      const value = await worker.call('drop', args, { timeoutMs: 180_000, signal: exec.signal })
+      bump('drops')
+      if (run) run.manifest.stats.steps = value.steps ?? run.manifest.stats.steps
+      record('drop', { residual_m: value.residual_m })
+      return value
+    },
+  }))
+
+  disposers.push(ctx.tools.register({
     name: 'robocasa_grasp',
     description:
       'Grasp an object at a world-space point using a multi-hypothesis search. Vision-based orientation is only '
       + 'accurate to roughly 30 degrees, so this tries the given yaw and then the offsets in turn, verifying each '
-      + 'attempt by checking whether the object actually starts to follow the gripper. Returns which yaw worked and '
-      + 'the per-attempt residuals. Use robocasa_locate first to get the grasp point.',
+      + 'attempt by checking whether the object actually starts to move up with the gripper. Returns which yaw '
+      + 'worked and the per-attempt residuals. Use robocasa_locate first to get the grasp point. '
+      + 'Set verify to the simulator object name you are actually grabbing: it defaults to "obj", and when the '
+      + 'target is a distractor (a carrot on the counter is often distr_counter) the default checks the wrong '
+      + 'body and reports failure even when the grasp worked.',
     parameters: {
       type: 'object',
       properties: {

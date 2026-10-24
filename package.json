@@ -1,6 +1,6 @@
 {
   "name": "@local/robocasa-control",
-  "version": "0.21.0",
+  "version": "0.22.0",
   "private": true,
   "type": "module",
   "description": "Control a RoboCasa kitchen simulation from chat.",
@@ -18,6 +18,7 @@
     "index.js",
     "locale/*.json",
     "planner.py",
+    "self_check.py",
     "test_planner.py",
     "viewer.py",
     "worker.py"
