@@ -149,6 +149,30 @@ worker 会清理宿主进程里的 socks 代理并使用本地缓存（`HF_HUB_O
 **已知偏差**：视觉长轴估计在当前机位下有约 **-30° 的系统偏差**。所以 `yaw_deg=视觉值, offsets=[-30]`
 是最稳的一次命中；默认的三次自动搜索在两次失败后手臂姿态会卡住，尚未解决。
 
+## 性能与 GPU
+
+在 RTX 5060 (sm_120) 上实测（`bench_sim.py` / `time_vision`）：
+
+| 环节 | 耗时 |
+|---|---:|
+| `create_env` + reset | 5.3 s（一次性） |
+| 物理单步 | 16.3 ms |
+| 离屏渲染 320×320 | 0.3 ms |
+| PNG 编码 320×320 | 8.8 ms |
+| `look()` 全流程 | 9.2 ms |
+| 视觉检测（CPU） | 2261 ms |
+| 视觉检测（GPU fp32） | 256 ms |
+| **视觉检测（GPU fp16，热）** | **93 ms** |
+| 视觉检测首次调用（含加载） | 2.4 s |
+
+**RTX 50 系（sm_120）必须用 CUDA 12.8 的 PyTorch 构建**，`cu126` 的 wheel 只编到 sm_90：
+
+```bash
+pip install --index-url https://download.pytorch.org/whl/cu128 torch==2.7.1+cu128 torchvision==0.22.1+cu128
+```
+
+worker 会自动选择 `cuda` 并切到 fp16；没有 GPU 时退回 CPU。
+
 ## 物体尺寸
 
 `open` 与 `status` 会同时给出物体的**世界坐标**与**包围盒尺寸**（米）。尺寸用于决定抓取下探深度与夹爪朝向，

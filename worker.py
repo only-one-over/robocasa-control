@@ -63,6 +63,8 @@ class Sim:
         self.preview_every = 2
         self._preview_tick = 0
         self._detector = None
+        self._device = "cpu"
+        self._half = False
         self.detector_id = "IDEA-Research/grounding-dino-tiny"
         self.detector_threshold = 0.15
 
@@ -251,9 +253,14 @@ class Sim:
         import torch  # noqa: PLC0415
         from transformers import AutoProcessor, AutoModelForZeroShotObjectDetection  # noqa: PLC0415
 
-        log(f"loading detector {self.detector_id}")
+        device = "cuda" if torch.cuda.is_available() else "cpu"
+        log(f"loading detector {self.detector_id} on {device}")
         proc = AutoProcessor.from_pretrained(self.detector_id)
-        model = AutoModelForZeroShotObjectDetection.from_pretrained(self.detector_id).eval()
+        model = AutoModelForZeroShotObjectDetection.from_pretrained(self.detector_id).eval().to(device)
+        self._device = device
+        self._half = device == "cuda"
+        if self._half:
+            model = model.half()
         self._detector = (proc, model)
         return self._detector
 
@@ -276,15 +283,22 @@ class Sim:
 
         proc, model = self._load_detector()
         pil = Image.fromarray(rgb)
-        inputs = proc(images=pil, text=[[query]], return_tensors="pt")
+        inputs = proc(images=pil, text=[[query]], return_tensors="pt").to(self._device)
+        if self._half:
+            inputs = {k: (v.half() if getattr(v, "dtype", None) == torch.float32 else v) for k, v in inputs.items()}
         with torch.no_grad():
             out = model(**inputs)
+        if self._half:
+            for field in ("logits", "pred_boxes"):
+                value = getattr(out, field, None)
+                if value is not None and hasattr(value, "float"):
+                    setattr(out, field, value.float())
         res = proc.post_process_grounded_object_detection(
-            out, inputs.input_ids, threshold=self.detector_threshold, text_threshold=0.15,
+            out, inputs["input_ids"], threshold=self.detector_threshold, text_threshold=0.15,
             target_sizes=[pil.size[::-1]],
         )[0]
-        boxes = res["boxes"].numpy().tolist()
-        scores = res["scores"].numpy().tolist()
+        boxes = res["boxes"].detach().cpu().numpy().tolist()
+        scores = res["scores"].detach().cpu().numpy().tolist()
         labels = res.get("text_labels", res.get("labels", [query] * len(boxes)))
 
         candidates = []

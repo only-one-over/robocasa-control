@@ -131,5 +131,15 @@ Python 侧崩溃了，错误信息附带最后几行 stderr。对照它修环境
 **渲染出来是黑图**
 `MUJOCO_GL` 没设或 EGL 不可用。`export MUJOCO_GL=egl`，或装 `libegl1`。
 
+**CUDA 报 `no kernel image is available for execution on the device`**
+PyTorch wheel 没编进你这张显卡的架构。RTX 50 系（sm_120）需要 CUDA 12.8 构建：
+
+```bash
+pip install --index-url https://download.pytorch.org/whl/cu128 torch==2.7.1+cu128 torchvision==0.22.1+cu128
+```
+
+换完用 `python -c "import torch; print(torch.cuda.get_arch_list())"` 确认列表里有 `sm_120`。
+（torch 在 robocasa 环境里是叶子依赖，换它不影响 robosuite/mujoco。）
+
 **体检说 import 失败，但终端里 `python -c "import robocasa"` 成功**
 解释器不是同一个。用 `which python` 和体检输出里的 `Interpreter:` 对照，改 `pythonPath`。
