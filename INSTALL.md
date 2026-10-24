@@ -46,13 +46,39 @@ python -m robocasa.scripts.download_kitchen_assets
 
 ## 2. 安装插件
 
-插件是以本地目录形式安装的 bundle：
+插件是一个 bundle，三种安装方式任选：
+
+**从 GitHub（推荐）**
+
+```bash
+pnpm add github:only-one-over/robocasa-control
+```
+
+**从 Release 压缩包**
+
+下载 <https://github.com/only-one-over/robocasa-control/releases/latest> 里的
+`robocasa-control-1.0.0.tgz`，在 DSH 里安装该文件。
+
+**从本地目录（开发时）**
 
 ```bash
 dsh plugin add /path/to/robocasa-control
 ```
 
-或者由智能体在对话里执行（需要 `plugin_manager` 权限）。装好后工具列表里应出现 `robocasa_doctor / open / look / move / rotate / act / status / reset / restart / close`。
+也可以由智能体在对话里执行（需要 `plugin_manager` 权限）：
+
+```
+plugin_manager install_bundle github:only-one-over/robocasa-control
+```
+
+装好后工具列表里应出现：
+
+```
+robocasa_doctor  open   locate  look    move   rotate  act
+grasp            drop   plan    status  reset  restart close  preview
+```
+
+> npm 上的同名包已占位但尚未批准发布（等待账号 2FA），在那之前请用上面的方式。
 
 ---
 

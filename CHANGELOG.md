@@ -25,6 +25,11 @@ camera, detector threshold, preview interval, running simulations with the
 ability to close them) and a draggable floating widget that is the only surface
 showing live frames.
 
+A recorded demo lives in the repository: `media/demo-pick-place.mp4` (full run) and
+`media/demo-pick-place.gif` (21 s highlight), both captured from the plugin's own
+preview stream at 20 Hz while the carrot was picked from the counter and dropped
+into the sink.
+
 Known limits, stated plainly:
 
 - the arm cannot recover from every jam; `recover` retries back-off poses but
