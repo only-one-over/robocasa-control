@@ -1,5 +1,11 @@
 # RoboCasa 仿真控制插件
 
+![抓取并放入水槽](media/demo-pick-place.gif)
+
+*机器人从台面抓起胡萝卜，绕开障碍送到水槽上方投放。画面来自插件的实时预览流，
+按 20 Hz 录制。完整版见 [media/demo-pick-place.mp4](media/demo-pick-place.mp4)。*
+
+
 在 DeepSeek Harness 里用对话操控 RoboCasa 厨房仿真：开场景、看相机、移动夹爪、检查任务是否成功。
 
 ## 结构
@@ -302,6 +308,27 @@ robocasa_look(free={"lookat": [0.3, -1.2, 1.0], "distance": 1.5})
 ```bash
 python test_planner.py
 ```
+
+### 安装
+
+**从 GitHub（当前推荐）**
+
+```bash
+pnpm add github:only-one-over/robocasa-control
+# 或在 DSH 里：plugin_manager install_bundle github:only-one-over/robocasa-control
+```
+
+也可以直接下载 `v1.0.0` Release 页附带的 `robocasa-control-1.0.0.tgz`。
+
+**从 npm**
+
+```bash
+npm i robocasa-control
+```
+
+> npm 上的 1.0.0 处于暂存状态，等待账号 2FA 批准后可用；
+> 包名已被占位版本 `0.0.0-stage` 锁定，不会丢失。
+> 在那之前请使用上面的 GitHub 方式。
 
 ### 安装与配置
 
