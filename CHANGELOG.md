@@ -3,6 +3,37 @@
 All notable changes to this plugin. Versions follow the package version; the
 project is pre-1.0, so behaviour may still change between minor versions.
 
+## 1.0.0 — first stable release
+
+The plugin controls a RoboCasa kitchen simulation from chat: 16 tools, a
+configuration panel, a floating live view, and a motion stack that plans around
+obstacles. Everything below was exercised against a live simulation.
+
+**Tools**: doctor, open, locate, look, move, rotate, act, grasp, drop, plan,
+status, reset, restart, close, preview, frame.
+
+**Motion**: absolute joint position control through damped least squares IK,
+with RRT-Connect detours when the direct path stalls, back-off recovery when the
+arm wedges, and a `failure` enum that distinguishes unreachable poses from
+blocked ones.
+
+**Perception**: Grounding DINO detection with depth back-projection, plus ground
+truth lookup by simulator object name.
+
+**UI**: a sidebar panel that is configuration-only (stream resolution, default
+camera, detector threshold, preview interval, running simulations with the
+ability to close them) and a draggable floating widget that is the only surface
+showing live frames.
+
+Known limits, stated plainly:
+
+- the arm cannot recover from every jam; `recover` retries back-off poses but
+  the successful case has not been reproduced on demand;
+- objects longer than the gripper opening are grasped at the edge;
+- a receptacle whose bottom sits below ~0.99 m needs `drop` rather than a place;
+- one worker per plugin instance: a second concurrent tool call is refused
+  rather than queued.
+
 ## 0.24.0 — portable configuration
 
 - Python is discovered instead of hardcoded: configured path, `ROBOCASA_PYTHON`,
