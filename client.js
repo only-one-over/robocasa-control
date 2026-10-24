@@ -370,6 +370,7 @@ window.__ModuleLoader__.load({
       const [state, settings] = useRoboCasaData()
       const [expanded, setExpanded] = React.useState(true)
       const [showControls, setShowControls] = React.useState(false)
+      const [retry, setRetry] = React.useState(0)
       const [pos, setPos] = React.useState(null)
       const drag = React.useRef(null)
 
@@ -470,8 +471,11 @@ window.__ModuleLoader__.load({
         ),
         open
           ? h('img', {
-              key: 'live',
+              // Remount on any view change or after a stream error: an MJPEG
+              // <img> keeps its last frame forever once the connection drops.
+              key: `live-${retry}-${settings ? [settings.viewMode, settings.azimuth, settings.elevation, settings.distance, settings.streamWidth, settings.streamHeight].join('-') : ''}`,
               src: '/robocasa/frame.mjpg',
+              onError: () => setRetry((value) => value + 1),
               alt: 'RoboCasa preview',
               width: showWidth,
               height: showHeight,
