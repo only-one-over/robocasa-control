@@ -110,6 +110,8 @@ window.__ModuleLoader__.load({
       const [state, setState] = React.useState(null)
       const [settings, setSettings] = React.useState(null)
       const [error, setError] = React.useState(null)
+      const [busy, setBusy] = React.useState(null)
+      const [message, setMessage] = React.useState(null)
 
       React.useEffect(() => {
         let alive = true
@@ -157,6 +159,24 @@ window.__ModuleLoader__.load({
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ mode }),
         }).catch(() => {})
+      }
+
+      const command = async (action, extra) => {
+        setBusy(action)
+        setMessage(null)
+        try {
+          const response = await fetch('/robocasa/command', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ action, ...(extra || {}) }),
+          })
+          const value = await response.json()
+          setMessage(value.ok ? `${action} 完成` : `${action} 失败：${value.error || '未知错误'}`)
+        } catch (err) {
+          setMessage(String(err && err.message ? err.message : err))
+        } finally {
+          setBusy(null)
+        }
       }
 
       const open = Boolean(state && state.open)
@@ -285,6 +305,40 @@ window.__ModuleLoader__.load({
           h(Button, { active: open && state.preview === 'shoulder', onClick: () => setPreview('shoulder'), disabled: !open }, '肩载'),
           h(Button, { active: open && state.preview === 'third_person', onClick: () => setPreview('third_person'), disabled: !open }, '第三人称'),
           h(Button, { active: open && state.preview === 'off', onClick: () => setPreview('off'), disabled: !open }, '关闭'),
+        ),
+
+        h(
+          'div',
+          { style: { display: 'flex', flexDirection: 'column', gap: 8, marginTop: 4 } },
+          h('div', { style: { fontSize: 12, opacity: 0.6, letterSpacing: '0.04em' } }, '控制'),
+          h(
+            'div',
+            { style: { display: 'grid', gridTemplateColumns: 'repeat(3, 44px)', gap: 6 } },
+            h(Button, { disabled: !open || busy, onClick: () => command('jog', { dx: -0.05 }) }, 'X−'),
+            h(Button, { disabled: !open || busy, onClick: () => command('jog', { dx: 0.05 }) }, 'X+'),
+            h(Button, { disabled: !open || busy, onClick: () => command('jog', { dz: 0.05 }) }, 'Z+'),
+            h(Button, { disabled: !open || busy, onClick: () => command('jog', { dy: -0.05 }) }, 'Y−'),
+            h(Button, { disabled: !open || busy, onClick: () => command('jog', { dy: 0.05 }) }, 'Y+'),
+            h(Button, { disabled: !open || busy, onClick: () => command('jog', { dz: -0.05 }) }, 'Z−'),
+          ),
+          h(
+            'div',
+            { style: { display: 'flex', gap: 6, flexWrap: 'wrap' } },
+            h(Button, { disabled: !open || busy, onClick: () => command('rotate', { dyaw: -15 }) }, '转 −15°'),
+            h(Button, { disabled: !open || busy, onClick: () => command('rotate', { dyaw: 15 }) }, '转 +15°'),
+            h(Button, { disabled: !open || busy, onClick: () => command('grip', { gripper: 'open' }) }, '开爪'),
+            h(Button, { disabled: !open || busy, onClick: () => command('grip', { gripper: 'close' }) }, '合爪'),
+            h(Button, { disabled: !open || busy, onClick: () => command('grasp') }, '抓取目标'),
+          ),
+          h(
+            'div',
+            { style: { display: 'flex', gap: 6, flexWrap: 'wrap' } },
+            h(Button, { disabled: !open || busy, onClick: () => command('reset') }, '新开一局'),
+            h(Button, { disabled: !open || busy, onClick: () => command('restart') }, '回开局'),
+            h(Button, { disabled: !open || busy, onClick: () => command('close') }, '关闭场景'),
+          ),
+          message ? h('div', { style: { fontSize: 11, fontFamily: MONO, opacity: 0.75 } }, message) : null,
+          busy ? h('div', { style: { fontSize: 11, fontFamily: MONO, opacity: 0.6 } }, `执行中：${busy}…`) : null,
         ),
 
         config,

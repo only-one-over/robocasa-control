@@ -751,6 +751,39 @@ class Sim:
             "mode": self.preview_mode,
         }
 
+    def jog(self, p):
+        """Move the end effector by a relative world delta (metres)."""
+        self._require_env()
+        cur = np.asarray(self.obs["robot0_eef_pos"], dtype=np.float64)
+        delta = np.array([float(p.get("dx", 0.0)), float(p.get("dy", 0.0)), float(p.get("dz", 0.0))])
+        return self.move({
+            "x": float(cur[0] + delta[0]),
+            "y": float(cur[1] + delta[1]),
+            "z": float(cur[2] + delta[2]),
+            "gripper": p.get("gripper"),
+            "max_steps": int(p.get("max_steps", 40)),
+        })
+
+    def grasp_object(self, p):
+        """Locate a simulator object by name and grasp it with the usual search."""
+        name = str(p.get("name", "obj"))
+        info = self.locate({"query": name})
+        match = next(
+            (m for m in info["matches"] if m.get("kind") == "object" and m.get("label") == name),
+            None,
+        )
+        if match is None:
+            raise RuntimeError(f"object not found: {name}")
+        offsets = p.get("offsets") or [0.0, -30.0, 30.0]
+        return self.grasp({
+            "x": match["grasp"][0],
+            "y": match["grasp"][1],
+            "z": match["grasp"][2],
+            "yaw_deg": match.get("grasp_yaw_deg") or 0.0,
+            "offsets": offsets,
+            "verify": name,
+        })
+
     def configure(self, p):
         """Apply runtime settings; unknown keys are ignored."""
         changed = {}
@@ -1008,6 +1041,8 @@ METHODS = {
     "status": Sim.status,
     "frame": Sim.frame,
     "state": Sim.state,
+    "jog": Sim.jog,
+    "grasp_object": Sim.grasp_object,
     "configure": Sim.configure,
     "settings": Sim.settings,
     "grasp": Sim.grasp,

@@ -466,6 +466,40 @@ export function apply(ctx, config = {}) {
     }))
     disposers.push(web.register({
       kind: 'exact',
+      path: '/robocasa/command',
+      handler: async (req, res) => {
+        if (req.method !== 'POST') {
+          sendJson(res, { error: 'POST only' }, 405)
+          return
+        }
+        let body = ''
+        try {
+          for await (const chunk of req) body += chunk
+          const payload = body ? JSON.parse(body) : {}
+          const action = String(payload.action ?? '')
+          let value
+          if (action === 'jog') {
+            value = await worker.call('jog', payload, { timeoutMs: 120_000 })
+          } else if (action === 'rotate') {
+            value = await worker.call('rotate', payload, { timeoutMs: 120_000 })
+          } else if (action === 'grip') {
+            value = await worker.call('act', { gripper: payload.gripper, steps: 12 }, { timeoutMs: 60_000 })
+          } else if (action === 'grasp') {
+            value = await worker.call('grasp_object', { name: payload.name || 'obj' }, { timeoutMs: 600_000 })
+          } else if (action === 'reset' || action === 'restart' || action === 'close') {
+            value = await worker.call(action, {}, { timeoutMs: 120_000 })
+          } else {
+            sendJson(res, { error: `unknown action: ${action}` }, 400)
+            return
+          }
+          sendJson(res, { ok: true, action, value })
+        } catch (error) {
+          sendJson(res, { ok: false, error: String(error?.message ?? error) }, 200)
+        }
+      },
+    }))
+    disposers.push(web.register({
+      kind: 'exact',
       path: '/robocasa/preview',
       handler: async (req, res) => {
         let body = ''
