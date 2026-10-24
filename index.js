@@ -939,8 +939,11 @@ export function apply(ctx, config = {}) {
         poseLine('Target', value.target),
         poseLine('End', value.end),
         `Orientation residual: ${value.rot_residual_rad} rad`,
+        value.planned && value.plan
+          ? `Planned a detour: ${value.plan.nodes} nodes, ${value.plan.checks} collision checks, ${value.plan.seconds}s`
+          : '',
         `Task success: ${value.success}`,
-      ].join('\n'))],
+      ].filter(Boolean).join('\n'))],
     },
     timeoutMs: 180_000,
     isConcurrencySafe: () => false,

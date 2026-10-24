@@ -674,6 +674,39 @@ class Sim:
             return np.array([[c, -s, 0.0], [s, c, 0.0], [0.0, 0.0, 1.0]]) @ R_now
         return None
 
+    def _held_geom_ids(self):
+        """Geoms of any object currently inside the gripper, so planning ignores it."""
+        env = self.env
+        model = self.robot_model.model
+        eef = np.asarray(self._eef_pos(), dtype=np.float64)
+        ids = []
+        for body_id in getattr(env, "obj_body_id", {}).values():
+            pos = np.asarray(env.sim.data.body_xpos[body_id], dtype=np.float64)
+            if float(np.linalg.norm(pos - eef)) > 0.13:
+                continue
+            start = int(model.body_geomadr[body_id])
+            count = int(model.body_geomnum[body_id])
+            ids.extend(range(start, start + count))
+        return ids
+
+    def _follow(self, path, gripper, qd_max: float = 1.0) -> int:
+        """Drive the arm along a joint-space path, one control step per waypoint."""
+        traj = time_parameterise(path, dt=0.05, qd_max=qd_max)
+        for q_cmd in traj:
+            action = self._action(q_cmd, gripper=gripper, torso=self.torso_cmd)
+            self.obs, _, _, _ = self.env.step(action)
+            self.steps += 1
+            self._after_step()
+        return len(traj)
+
+    def _plan_to(self, q_goal):
+        """Plan from the live configuration to q_goal, ignoring what we carry."""
+        self.checker.set_attached_geoms(self._held_geom_ids())
+        try:
+            return self.planner.plan(self._q(), q_goal)
+        finally:
+            self.checker.set_attached_geoms([])
+
     def _servo(self, q_goal, gripper, max_steps, target, target_rot, tol, rot_tol):
         """Hold an absolute joint target until the end effector converges."""
         env = self.env
@@ -725,10 +758,24 @@ class Sim:
                 "success": self._success(),
             }
 
+        budget = min(max_steps, 25)
         used, residual, rot_residual = self._servo(
-            q_goal, gripper, max_steps, target, target_rot, tol, rot_tol
+            q_goal, gripper, budget, target, target_rot, tol, rot_tol
         )
+        plan_info = None
+        if residual > max(tol * 2.0, 0.05) and bool(p.get("plan", True)):
+            path, plan_info = self._plan_to(q_goal)
+            if path is not None:
+                # The detour gets its own budget: sharing it with the final servo
+                # used to consume every step and leave nothing to converge with.
+                used += self._follow(path, gripper)
+                u2, residual, rot_residual = self._servo(
+                    q_goal, gripper, max(40, max_steps), target, target_rot, tol, rot_tol
+                )
+                used += u2
         return {
+            "planned": bool(plan_info and plan_info.get("nodes")),
+            "plan": plan_info,
             "start": start,
             "target": [float(v) for v in target],
             "end": self._eef_pos(),

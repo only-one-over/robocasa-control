@@ -202,13 +202,29 @@ class CollisionChecker:
         self.data = robot.data
         self.prefix = robot.prefix
         self.allowed = set()
+        # Geoms of the object in the gripper: colliding with the world counts as a
+        # collision, but they must not be reported as robot-vs-object touches.
+        self.attached = set()
         for name in allowed_geom_names:
             gid = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_GEOM, name)
             if gid >= 0:
                 self.allowed.add(int(gid))
         self.checks = 0
 
+    def set_allowed_geoms(self, geom_ids) -> None:
+        """Treat these geoms as free space, e.g. the object being carried."""
+        self.allowed = set(int(g) for g in geom_ids)
+
+    def add_allowed_geoms(self, geom_ids) -> None:
+        self.allowed.update(int(g) for g in geom_ids)
+
+    def set_attached_geoms(self, geom_ids) -> None:
+        """Mark carried geoms: they collide with the world like part of the robot."""
+        self.attached = set(int(g) for g in geom_ids)
+
     def _is_robot(self, geom_id: int) -> bool:
+        if int(geom_id) in self.attached:
+            return True
         name = mujoco.mj_id2name(self.model, mujoco.mjtObj.mjOBJ_GEOM, geom_id) or ""
         return name.startswith(self.prefix)
 
