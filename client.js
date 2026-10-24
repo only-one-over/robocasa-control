@@ -559,12 +559,12 @@ window.__ModuleLoader__.load({
               h(Select, {
                 value: settings.elevation,
                 options: [-15, -25, -32, -45, -62].map((v) => [v, `俯角 ${v}°`]),
-                onChange: (value) => patchSettings({ elevation: Number(v) }),
+                onChange: (value) => patchSettings({ elevation: Number(value) }),
               }),
               h(Select, {
                 value: settings.distance,
                 options: [1.8, 2.2, 2.8, 3.6, 4.5].map((v) => [v, `距离 ${v}m`]),
-                onChange: (value) => patchSettings({ distance: Number(v) }),
+                onChange: (value) => patchSettings({ distance: Number(value) }),
               }),
             )
           : null,
