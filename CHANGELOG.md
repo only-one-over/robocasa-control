@@ -3,6 +3,22 @@
 All notable changes to this plugin. Versions follow the package version; the
 project is pre-1.0, so behaviour may still change between minor versions.
 
+## 1.1.0 — sensor mode
+
+`open(perception="sensors")` removes every ground-truth shortcut, so the agent
+only sees what a real robot has:
+
+- `locate` refuses the oracle backend and falls back to the detector;
+  `status` reports no object positions at all.
+- `robocasa_scan` projects the depth image into a point cloud (robot's own geoms
+  filtered out) and reports clearance up/down/left/right/front/back.
+- `status` reports `holding` from gripper contact, and the success flag is
+  marked evaluation-only so it cannot be used as a decision input.
+
+Measured on seed 4: the detector put the carrot at (1.872, -0.774, 0.953) with
+yaw -31.7 while the simulator has (1.852, -0.773, 0.940) at -28 — a 2 cm / 3.7
+degree estimation error, which is the realistic cost of dropping the oracle.
+
 ## 1.0.2 — the preview no longer vanishes during a run
 
 - While a long call held the worker, `/robocasa/state` answered with a reduced

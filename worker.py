@@ -21,6 +21,7 @@ import sys
 import time
 import traceback
 
+import mujoco
 import numpy as np
 
 from planner import CollisionChecker, Planner, RobotModel, time_parameterise
@@ -99,6 +100,9 @@ class Sim:
         self._snapshot = None
         self.torso_cmd = 0.0
         self.held_object = None
+        # "oracle" reads simulator ground truth; "sensors" only uses what a real
+        # robot has: depth, contact and proprioception.
+        self.perception = "oracle"
         self.preview_mode = "off"
         self.stream_on = False
         self.preview_size = (320, 240)
@@ -261,6 +265,9 @@ class Sim:
         self.task = p.get("task", "PickPlaceCounterToCabinet")
         self.seed = int(p.get("seed", 0))
         self.camera = p.get("camera", "robot0_agentview_left")
+        self.perception = str(p.get("perception") or "oracle")
+        if self.perception not in ("oracle", "sensors"):
+            self.perception = "oracle"
         self.width = int(p.get("width", 320))
         self.height = int(p.get("height", 320))
         self.shots_dir = p.get("shots_dir") or self.shots_dir
@@ -390,6 +397,108 @@ class Sim:
             "eef_quat": self._eef_quat(),
             "success": self._success(),
             "steps": 0,
+        }
+
+    def _depth_points(self, step: int = 3):
+        """World-frame points from the current camera depth image."""
+        env = self._require_env()
+        from robosuite.utils.camera_utils import (  # noqa: PLC0415
+            get_camera_intrinsic_matrix, get_camera_extrinsic_matrix, get_real_depth_map,
+        )
+
+        cam, H, W = self.camera, self.height, self.width
+        _, dep = env.sim.render(width=W, height=H, camera_name=cam, depth=True)
+        depth = get_real_depth_map(env.sim, np.asarray(dep)[::-1].copy())
+        K = get_camera_intrinsic_matrix(env.sim, cam, H, W)
+        E = get_camera_extrinsic_matrix(env.sim, cam)
+        K_inv = np.linalg.inv(K)
+
+        vs, us = np.mgrid[0:H:step, 0:W:step]
+        z = depth[vs, us]
+        keep = (z > 0.02) & (z < 8.0)
+        # Drop the robot's own body: a real robot knows which points are its own
+        # links, and without this every clearance reading is the gripper itself.
+        try:
+            model = self.robot_model.model
+            data = env.sim.data
+            own = [
+                g for g in range(model.ngeom)
+                if (mujoco.mj_id2name(model, mujoco.mjtObj.mjOBJ_GEOM, g) or "").startswith(
+                    self.robot_model.prefix
+                )
+            ]
+            if own:
+                centres = np.asarray(data.geom_xpos[own], dtype=np.float64)
+                radii = np.asarray(model.geom_rbound[own], dtype=np.float64) * 1.15
+                # points are built below; filter after back-projection
+                self._self_geoms = (centres, radii)
+        except Exception:
+            self._self_geoms = None
+        us, vs, z = us[keep], vs[keep], z[keep]
+        if z.size == 0:
+            return np.zeros((0, 3))
+        rays = np.stack([us, vs, np.ones_like(us)], axis=1) @ K_inv.T
+        cam_pts = rays * z[:, None]
+        world = (E @ np.hstack([cam_pts, np.ones((z.size, 1))]).T)[:3].T
+        self_geoms = getattr(self, "_self_geoms", None)
+        if self_geoms is not None:
+            centres, radii = self_geoms
+            dist = np.linalg.norm(world[:, None, :] - centres[None, :, :], axis=2)
+            outside = np.all(dist > radii[None, :], axis=1)
+            world = world[outside]
+        return world
+
+    @staticmethod
+    def _clearance(points: np.ndarray, origin, radius: float = 0.14) -> dict:
+        """Nearest surface distance along six directions, measured from points."""
+        if points.size == 0:
+            return {name: None for name in ("up", "down", "left", "right", "front", "back")}
+        delta = points - np.asarray(origin, dtype=np.float64)
+        out = {}
+        for name, axis in (
+            ("up", (0, 0, 1)), ("down", (0, 0, -1)),
+            ("left", (-1, 0, 0)), ("right", (1, 0, 0)),
+            ("front", (0, -1, 0)), ("back", (0, 1, 0)),
+        ):
+            unit = np.asarray(axis, dtype=np.float64)
+            along = delta @ unit
+            lateral = np.linalg.norm(delta - along[:, None] * unit, axis=1)
+            mask = (along > 0.03) & (lateral < radius)
+            out[name] = _num(float(along[mask].min())) if bool(np.any(mask)) else None
+        return out
+
+    def _holding(self) -> dict:
+        """Whether the fingers currently touch something that is not the robot."""
+        env = self._require_env()
+        data = env.sim.data
+        touching = False
+        for i in range(data.ncon):
+            contact = data.contact[i]
+            g1, g2 = int(contact.geom1), int(contact.geom2)
+            r1 = self._is_robot_geom(g1)
+            r2 = self._is_robot_geom(g2)
+            if r1 != r2:
+                touching = True
+                break
+        return {"touching": touching, "object": self.held_object}
+
+    def _is_robot_geom(self, geom_id: int) -> bool:
+        name = mujoco.mj_id2name(self.robot_model.model, mujoco.mjtObj.mjOBJ_GEOM, int(geom_id)) or ""
+        return name.startswith(self.robot_model.prefix)
+
+    def scan(self, p):
+        """Summarise nearby geometry from depth: what a depth camera can see."""
+        self._require_env()
+        origin = p.get("lookat") or self._eef_pos()
+        pts = self._depth_points()
+        clearance = self._clearance(pts, origin)
+        return {
+            "camera": self.camera,
+            "points": int(pts.shape[0]),
+            "lookat": [float(v) for v in origin],
+            "clearance_m": clearance,
+            "holding": self._holding(),
+            "source": "depth",
         }
 
     def _load_detector(self):
@@ -532,8 +641,15 @@ class Sim:
         same response shape.
         """
         env = self._require_env()
-        if str(p.get("backend", "ground_truth")) == "vision":
+        default_backend = "vision" if self.perception == "sensors" else "ground_truth"
+        backend = str(p.get("backend") or default_backend)
+        if backend == "vision":
             return self._vision_locate(str(p.get("query", "")).strip())
+        if self.perception == "sensors":
+            raise RuntimeError(
+                "ground truth is disabled in sensor mode: use backend='vision', or "
+                "robocasa_scan for geometry from depth"
+            )
         query = str(p.get("query", "")).strip().lower()
         matches = []
 
@@ -984,7 +1100,7 @@ class Sim:
                 "failure": failure,
                 "residual_m": moved.get("residual_m"),
                 "approach": [float(v) for v in approach],
-                "objects": _object_positions(self.env),
+                "objects": None if self.perception == "sensors" else _object_positions(self.env),
                 "eef_pos": self._eef_pos(),
                 "success": self._success(),
             }
@@ -1000,7 +1116,7 @@ class Sim:
             "approach": [float(v) for v in approach],
             "residual_m": moved.get("residual_m"),
             "failure": moved.get("failure"),
-            "objects": _object_positions(self.env),
+            "objects": None if self.perception == "sensors" else _object_positions(self.env),
             "eef_pos": self._eef_pos(),
             "success": self._success(),
         }
@@ -1173,17 +1289,29 @@ class Sim:
 
     def status(self, p):
         env = self._require_env()
-        return {
+        oracle = self.perception != "sensors"
+        value = {
             "task": self.task,
             "seed": self.seed,
             "camera": self.camera,
+            "perception": self.perception,
             "steps": self.steps,
             "eef_pos": self._eef_pos(),
             "eef_quat": self._eef_quat(),
+            # success is simulator evaluation, never a decision input
             "success": self._success(),
-            "objects": _object_positions(env),
-            "dimensions": _object_dimensions(env),
+            "evaluation_only": {"success": True},
+            "holding": self._holding(),
         }
+        if oracle:
+            value["objects"] = _object_positions(env)
+            value["dimensions"] = _object_dimensions(env)
+        else:
+            value["note"] = (
+                "sensor mode: object positions come from robocasa_locate(backend='vision') "
+                "or robocasa_scan, not from the simulator"
+            )
+        return value
 
     def close(self, p):
         if self.env is not None:
@@ -1338,6 +1466,7 @@ METHODS = {
     "rotate": Sim.rotate,
     "status": Sim.status,
     "frame": Sim.frame,
+    "scan": Sim.scan,
     "plan": Sim.plan,
     "drop": Sim.drop,
     "state": Sim.state,

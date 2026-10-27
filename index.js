@@ -895,7 +895,9 @@ export function apply(ctx, config = {}) {
       'Open a RoboCasa kitchen simulation and keep it running in a background process. '
       + 'Call this once before any other robocasa_* tool. Opening a new scene replaces the current one. '
       + 'Returns the end-effector pose and the world positions of the task objects, which you need as '
-      + 'targets for robocasa_move. Positions are world coordinates and differ per seed; never assume them.',
+      + 'targets for robocasa_move. Positions are world coordinates and differ per seed; never assume them. '
+      + 'With perception="sensors" no ground truth is returned and object positions must come from '
+      + 'robocasa_locate(backend="vision") or robocasa_scan.',
     parameters: {
       type: 'object',
       properties: {
@@ -910,6 +912,15 @@ export function apply(ctx, config = {}) {
         camera: { type: 'string', description: 'Camera used by robocasa_look.', default: 'robot0_agentview_left' },
         width: { type: 'number', description: 'Render width in pixels (default 320).', default: 320 },
         height: { type: 'number', description: 'Render height in pixels (default 320).', default: 320 },
+        perception: {
+          type: 'string',
+          enum: ['oracle', 'sensors'],
+          description: 'Where observations come from. oracle (default) may read simulator ground truth: exact '
+            + 'object poses, fixture interiors and the task success flag. sensors restricts everything to what a '
+            + 'real robot has - camera depth, contact and proprioception - so locate() only runs the detector and '
+            + 'object positions must come from vision or scan. Use sensors for honest evaluation.',
+          default: 'oracle',
+        },
         preview: {
           type: 'string',
           enum: ['off', 'shoulder', 'third_person'],
@@ -969,7 +980,12 @@ export function apply(ctx, config = {}) {
       run.manifest.environment = result.versions || {}
       run.manifest.stats.steps = 0
       record('open', { task: result.task, seed: result.seed, camera: result.camera })
-      return { ...result, objects: status.objects, dimensions: status.dimensions, run_dir: dir }
+      // Sensor mode has no ground-truth objects: attach them only when present,
+      // because an undefined property does not survive a JSON round trip.
+      const extras = {}
+      if (status.objects) extras.objects = status.objects
+      if (status.dimensions) extras.dimensions = status.dimensions
+      return { ...result, ...extras, run_dir: dir }
     },
   }))
 
@@ -995,8 +1011,8 @@ export function apply(ctx, config = {}) {
         backend: {
           type: 'string',
           enum: ['ground_truth', 'vision'],
-          description: 'ground_truth (default) reads simulator state; vision runs the detector on the current frame.',
-          default: 'ground_truth',
+          description: 'ground_truth reads simulator state and vision runs the detector on the current frame. '
+            + 'Omit it to follow the scene perception mode: ground_truth in oracle mode, vision in sensor mode.',
         },
       },
       required: ['query'],
@@ -1048,9 +1064,11 @@ export function apply(ctx, config = {}) {
     timeoutMs: 180_000,
     isConcurrencySafe: () => true,
     async execute(args, exec) {
-      const params = { query: args.query ?? 'all', backend: args.backend ?? 'ground_truth' }
-      const timeout = params.backend === 'vision' ? 180_000 : 30_000
-      return worker.call('locate', params, { timeoutMs: timeout, signal: exec.signal })
+      // Leave backend unset so the scene's perception mode decides; sending the
+      // oracle default explicitly would defeat sensor mode.
+      const params = { query: args.query ?? 'all' }
+      if (args.backend) params.backend = args.backend
+      return worker.call('locate', params, { timeoutMs: 180_000, signal: exec.signal })
     },
   }))
 
@@ -1468,6 +1486,49 @@ export function apply(ctx, config = {}) {
   }))
 
   disposers.push(ctx.tools.register({
+    name: 'robocasa_scan',
+    description:
+      'Measure the space around a point from the depth camera: the nearest surface up, down, left, right, front '
+      + 'and back, plus whether the gripper is touching anything. This is what a depth sensor can actually tell '
+      + 'you, in contrast to robocasa_locate with ground truth. Use it before lifting an arm under a cabinet or '
+      + 'before moving into a tight space: it answers "how much clearance is there" without guessing from pixels.',
+    parameters: {
+      type: 'object',
+      properties: {
+        lookat: {
+          type: 'array',
+          items: { type: 'number' },
+          description: 'World point to measure around; defaults to the end effector.',
+        },
+      },
+      required: [],
+      additionalProperties: false,
+    },
+    output: {
+      schema: { type: 'object', additionalProperties: true },
+      render: (_args, value) => {
+        const c = value.clearance_m || {}
+        const fmt = (v) => (typeof v === 'number' ? `${v.toFixed(3)} m` : 'blocked/unknown')
+        return [text([
+          `Depth scan from ${value.camera}: ${value.points} points`,
+          poseLine('Around', value.lookat),
+          `Clearance  up ${fmt(c.up)} | down ${fmt(c.down)}`,
+          `           left ${fmt(c.left)} | right ${fmt(c.right)}`,
+          `           front ${fmt(c.front)} | back ${fmt(c.back)}`,
+          `Gripper touching: ${value.holding && value.holding.touching ? 'yes' : 'no'}`,
+        ].join('\n'))]
+      },
+    },
+    timeoutMs: 60_000,
+    isConcurrencySafe: () => true,
+    async execute(args, exec) {
+      const value = await worker.call('scan', args, { timeoutMs: 60_000, signal: exec.signal })
+      record('scan', { points: value.points })
+      return value
+    },
+  }))
+
+  disposers.push(ctx.tools.register({
     name: 'robocasa_status',
     description:
       'Report the live simulation state: step count, end-effector pose, task success and the world positions of '
@@ -1479,10 +1540,13 @@ export function apply(ctx, config = {}) {
         `${value.task} (seed ${value.seed}) — step ${value.steps}`,
         poseLine('End effector', value.eef_pos),
         `Yaw: ${yawOf(value.eef_quat) ?? 'n/a'} deg`,
-        `Task success: ${value.success}`,
+        `Task success: ${value.success}${value.evaluation_only ? ' (evaluation only)' : ''}`,
+        value.perception ? `Perception: ${value.perception}` : '',
+        value.holding ? `Holding: ${value.holding.touching ? `yes${value.holding.object ? ` (${value.holding.object})` : ''}` : 'no'}` : '',
+        value.note ? value.note : '',
         ...objectLines(value.objects),
         ...dimensionLines(value.dimensions),
-      ].join('\n'))],
+      ].filter(Boolean).join('\n'))],
     },
     timeoutMs: 30_000,
     isConcurrencySafe: () => true,
