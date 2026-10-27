@@ -3,6 +3,18 @@
 All notable changes to this plugin. Versions follow the package version; the
 project is pre-1.0, so behaviour may still change between minor versions.
 
+## 1.0.2 — the preview no longer vanishes during a run
+
+- While a long call held the worker, `/robocasa/state` answered with a reduced
+  payload that had no task name. The floating widget called
+  `state.task.replace(...)`, threw, and React unmounted it — so the picture
+  disappeared as soon as anything started running. The route now serves the last
+  known scene plus a `busy` flag, and the client tolerates missing fields.
+- Aborting a tool call no longer kills the worker: the call finishes in the
+  background and its reply releases the busy lock.
+- `stop()` clears `sceneOpen`, which previously left the plugin believing a
+  scene was open after the process had been replaced.
+
 ## 1.0.1 — client module fix
 
 - The zh locale table called its own lookup function before it was defined, so

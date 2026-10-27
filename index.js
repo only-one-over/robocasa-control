@@ -205,6 +205,8 @@ class SimWorker {
     this.busy = null
     /** Last scene this plugin opened, so a crash can tell the user what to reopen. */
     this.lastScene = null
+    /** Last successful state payload, served while the worker is busy. */
+    this.lastState = null
   }
 
   /** Error text that carries the worker's own diagnostics. */
@@ -708,7 +710,10 @@ export function apply(ctx, config = {}) {
       path: '/robocasa/state',
       handler: async (req, res) => {
         if (worker.busy) {
+          // Keep serving the last known scene so the UI can keep rendering
+          // while a long call holds the worker; only the flag is new.
           sendJson(res, {
+            ...(worker.lastState || {}),
             open: worker.sceneOpen,
             busy: worker.busy,
             lastScene: worker.lastScene,
@@ -727,6 +732,7 @@ export function apply(ctx, config = {}) {
         }
         try {
           const value = await worker.call('state', {}, { timeoutMs: 10_000, spawn: false })
+          worker.lastState = value
           sendJson(res, value)
         } catch (error) {
           sendJson(res, { open: false, error: String(error?.message ?? error) }, 200)

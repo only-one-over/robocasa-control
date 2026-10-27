@@ -322,7 +322,7 @@ window.__ModuleLoader__.load({
           h(
             'span',
             { style: { fontSize: 12, opacity: 0.7, fontFamily: MONO } },
-            open ? `${state.task} · seed ${state.seed}` : t('noScene'),
+            open ? `${state.task || t('title')} · seed ${state.seed ?? '-'}` : t('noScene'),
           ),
         ),
 
@@ -522,7 +522,7 @@ window.__ModuleLoader__.load({
               touchAction: 'none',
             },
           },
-          h('span', null, open ? `${state.task.replace('PickPlace', '')} · s${state.seed}` : t('noScene')),
+          h('span', null, open ? `${String(state.task || 'scene').replace('PickPlace', '')} · s${state.seed ?? '-'}` : t('noScene')),
           h(
             'button',
             {
