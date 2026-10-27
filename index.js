@@ -235,13 +235,16 @@ class SimWorker {
       stdio: ['pipe', 'pipe', 'pipe'],
     })
     this.child = child
+    // stderr belongs to one process: mixing generations made a normal restart
+    // look like a scene disappearing mid-run.
+    this.stderr = []
     child.stdout.setEncoding('utf8')
     child.stderr.setEncoding('utf8')
     child.stdout.on('data', (chunk) => this.#onData(chunk))
     child.stderr.on('data', (chunk) => {
       for (const raw of String(chunk).split('\n')) {
         const line = raw.replace(/\s+$/, '')
-        if (line.trim()) this.stderr.push(line)
+        if (line.trim()) this.stderr.push(`[${child.pid}] ${line}`)
       }
       if (this.stderr.length > 200) this.stderr.splice(0, this.stderr.length - 200)
     })
@@ -315,6 +318,9 @@ class SimWorker {
   }
 
   async #dispatch(method, params = {}, options = {}) {
+    if (options.spawn === false && !this.child) {
+      throw new Error('no worker process running')
+    }
     await this.ensurePython()
     this.#start()
     const id = ++this.seq
@@ -543,7 +549,7 @@ export function apply(ctx, config = {}) {
     let lastBytes = null
 
     const streaming = true
-    await worker.call('set_streaming', { on: true }, { timeoutMs: 5000 }).catch(() => undefined)
+    await worker.call('set_streaming', { on: true }, { timeoutMs: 5000, spawn: false }).catch(() => undefined)
 
     while (!closed && !disposed) {
       let bytes = null
@@ -568,7 +574,7 @@ export function apply(ctx, config = {}) {
       await sleep(90)
     }
     if (streaming) {
-      await worker.call('set_streaming', { on: false }, { timeoutMs: 5000 }).catch(() => undefined)
+      await worker.call('set_streaming', { on: false }, { timeoutMs: 5000, spawn: false }).catch(() => undefined)
     }
     res.end()
   }
@@ -706,7 +712,7 @@ export function apply(ctx, config = {}) {
           return
         }
         try {
-          const value = await worker.call('state', {}, { timeoutMs: 10_000 })
+          const value = await worker.call('state', {}, { timeoutMs: 10_000, spawn: false })
           sendJson(res, value)
         } catch (error) {
           sendJson(res, { open: false, error: String(error?.message ?? error) }, 200)

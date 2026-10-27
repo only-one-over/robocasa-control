@@ -1093,7 +1093,9 @@ class Sim:
     def set_streaming(self, p):
         """Enable frame writing for web clients without touching the preview window."""
         self.stream_on = bool(p.get("on"))
-        if self.stream_on:
+        # A worker that was just spawned has no scene yet; writing a frame here
+        # would log a misleading "no simulation open" on a perfectly normal start.
+        if self.stream_on and self.env is not None:
             self._write_preview()
         return {"streaming": self.stream_on}
 
