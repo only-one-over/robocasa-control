@@ -280,6 +280,10 @@ class SimWorker {
       if (!entry) continue
       this.pending.delete(message.id)
       clearTimeout(entry.timer)
+      if (entry.abandoned) {
+        this.busy = null
+        continue
+      }
       if (message.ok) entry.resolve(message.result)
       else entry.reject(new Error(message.error || 'simulation worker error'))
     }
@@ -310,10 +314,13 @@ class SimWorker {
     }
     const previous = this.busy
     if (exclusive) this.busy = method
+    let handedOff = false
     try {
-      return await this.#dispatch(method, params, options)
+      return await this.#dispatch(method, params, { ...options, onHandOff: () => { handedOff = true } })
     } finally {
-      this.busy = previous
+      // An aborted call keeps running in the worker; the reply handler clears
+      // the lock when it finally arrives, so the UI keeps showing busy.
+      if (!handedOff) this.busy = previous
     }
   }
 
@@ -336,9 +343,13 @@ class SimWorker {
         reject(this.#decorate(new Error(`simulation call '${method}' timed out after ${timeoutMs} ms`)))
       }, timeoutMs)
       const onAbort = () => {
-        this.pending.delete(id)
+        // Aborting the request must not kill the worker: the simulation state is
+        // the expensive part, and the in-flight call finishes on its own. Keep
+        // the pending entry so its reply releases the busy lock.
         clearTimeout(timer)
-        this.stop()
+        options.onHandOff?.()
+        const entry = this.pending.get(id)
+        if (entry) entry.abandoned = true
         reject(new Error('aborted'))
       }
       signal?.addEventListener('abort', onAbort, { once: true })
@@ -371,6 +382,9 @@ class SimWorker {
   stop() {
     const child = this.child
     this.child = null
+    // Without this the exit handler treats the child as replaced and returns
+    // early, leaving the plugin believing a scene is still open.
+    this.sceneOpen = false
     if (child) {
       try {
         child.stdin.write(JSON.stringify({ id: 0, method: 'close', params: {} }) + '\n')
