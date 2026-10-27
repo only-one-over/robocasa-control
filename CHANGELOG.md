@@ -3,6 +3,14 @@
 All notable changes to this plugin. Versions follow the package version; the
 project is pre-1.0, so behaviour may still change between minor versions.
 
+## 1.0.1 — client module fix
+
+- The zh locale table called its own lookup function before it was defined, so
+  the client module threw a temporal-dead-zone error and the plugin failed to
+  load in the browser. The table now holds literal strings.
+- Added `client-check.mjs`: it loads the module through a stub loader and renders
+  every registered component, which `node --check` cannot catch.
+
 ## 1.0.0 — first stable release
 
 The plugin controls a RoboCasa kitchen simulation from chat: 16 tools, a

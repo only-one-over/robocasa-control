@@ -1,6 +1,6 @@
 {
   "name": "robocasa-control",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "private": false,
   "type": "module",
   "description": "Control a RoboCasa kitchen simulation from chat: MuJoCo motion planning, a config panel and a live view, as a DeepSeek Harness plugin.",
@@ -11,20 +11,21 @@
     "./icon": "./icon.svg"
   },
   "files": [
-    "index.js",
-    "client.js",
-    "worker.py",
-    "planner.py",
-    "doctor.py",
-    "viewer.py",
-    "self_check.py",
-    "cordis.patch.yml",
-    "locale/*.json",
-    "icon.svg",
-    "README.md",
-    "INSTALL.md",
     "CHANGELOG.md",
-    "LICENSE"
+    "INSTALL.md",
+    "LICENSE",
+    "README.md",
+    "client-check.mjs",
+    "client.js",
+    "cordis.patch.yml",
+    "doctor.py",
+    "icon.svg",
+    "index.js",
+    "locale/*.json",
+    "planner.py",
+    "self_check.py",
+    "viewer.py",
+    "worker.py"
   ],
   "dsh": {
     "bundle": {
@@ -39,7 +40,7 @@
     "dsh": ">=0.1.0"
   },
   "scripts": {
-    "check": "node --check index.js && node --check client.js",
+    "check": "node --check index.js && node --check client.js && node client-check.mjs",
     "test": "python3 self_check.py"
   },
   "keywords": [
