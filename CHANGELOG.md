@@ -3,6 +3,28 @@
 All notable changes to this plugin. Versions follow the package version; the
 project is pre-1.0, so behaviour may still change between minor versions.
 
+## 1.2.0 — batch evaluation
+
+The plugin can now be used as an experiment harness, not only through chat.
+
+- `evaluate.py` runs a policy across tasks, seeds and episodes in one worker
+  process and writes a CSV (success, steps, tool calls, wall time, last action)
+  plus optional per-episode HDF5 recordings (`--record`).
+- `policies.py` defines the policy interface: a small state machine that issues
+  tool calls, with three builtins (`noop`, `grasp`, `grasp_place`) and
+  `module:Class` loading for your own.
+- `rpc_client.py` is the shared worker client; `self_check.py` now imports it.
+
+First measurements on seed 4 with `grasp_place`:
+
+| condition | calls | outcome |
+|---|---|---|
+| oracle | 5 | grasp ok, placement ok, task false — the cabinet door is closed, so the object bounced back to the counter |
+| sensors | 3 | **grasp ok**, then stopped: receptacle interiors are oracle-only, and vision returns boxes without an interior |
+
+That asymmetry is the useful part: the perception gap shows up in receptacle
+reasoning, not in grasping.
+
 ## 1.1.1 — show the stack in the panel
 
 The panel now lists what the plugin is actually using: detector and threshold,
