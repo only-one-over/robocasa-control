@@ -24,6 +24,17 @@ import time
 import mujoco
 import numpy as np
 
+# Algorithm parameters live here so the UI can report the values actually in
+# use instead of a hand-copied description that drifts.
+IK_DAMPING = 0.08
+IK_MAX_STEP = 0.4
+IK_TOL_POS = 2e-3
+IK_TOL_ROT = 0.03
+COLLISION_TOLERANCE = 0.005
+RRT_STEP = 0.12
+RRT_EDGE_STEP = 0.06
+RRT_MAX_ITERS = 3000
+
 
 class RobotModel:
     """Joint addresses and limits for one arm of a robosuite robot."""
@@ -140,8 +151,8 @@ class RobotModel:
         return np.vstack([jacp[:, self.dof_adr], jacr[:, self.dof_adr]])
 
     def ik(self, target_pos, target_rot=None, q_init=None, iters: int = 80,
-           tol_pos: float = 2e-3, tol_rot: float = 0.03, damping: float = 0.08,
-           max_step: float = 0.4) -> tuple[np.ndarray | None, dict]:
+           tol_pos: float = IK_TOL_POS, tol_rot: float = IK_TOL_ROT,
+           damping: float = IK_DAMPING, max_step: float = IK_MAX_STEP) -> tuple[np.ndarray | None, dict]:
         """Damped least squares IK; returns the solution and diagnostics."""
         self.save()
         try:
@@ -192,7 +203,7 @@ class RobotModel:
 class CollisionChecker:
     """Contact-based collision queries against the live MuJoCo model."""
 
-    def __init__(self, robot: RobotModel, allowed_geom_names=(), depth_tolerance: float = 0.005):
+    def __init__(self, robot: RobotModel, allowed_geom_names=(), depth_tolerance: float = COLLISION_TOLERANCE):
         self.robot = robot
         # Contacts shallower than this are treated as free space: the sim
         # allows small penetrations and a planner that rejects 2 mm would
@@ -284,8 +295,8 @@ class Planner:
         self.checker = checker
         self.rng = np.random.default_rng(seed)
 
-    def plan(self, q_start, q_goal, max_iters: int = 3000, step: float = 0.12,
-             check_step: float = 0.06) -> tuple[list[np.ndarray] | None, dict]:
+    def plan(self, q_start, q_goal, max_iters: int = RRT_MAX_ITERS, step: float = RRT_STEP,
+             check_step: float = RRT_EDGE_STEP) -> tuple[list[np.ndarray] | None, dict]:
         self.robot.save()
         try:
             return self._plan_inner(q_start, q_goal, max_iters, step, check_step)

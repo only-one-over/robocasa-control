@@ -3,6 +3,14 @@
 All notable changes to this plugin. Versions follow the package version; the
 project is pre-1.0, so behaviour may still change between minor versions.
 
+## 1.1.1 — show the stack in the panel
+
+The panel now lists what the plugin is actually using: detector and threshold,
+IK method with damping and multi-start count, controller type and gain, planner
+with step size and collision tolerance, and the current camera among the six
+available. The numbers come from status.stack, which reads the same constants
+the algorithms use, so the display cannot drift from the code.
+
 ## 1.1.0 — sensor mode
 
 `open(perception="sensors")` removes every ground-truth shortcut, so the agent

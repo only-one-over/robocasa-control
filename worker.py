@@ -24,7 +24,10 @@ import traceback
 import mujoco
 import numpy as np
 
-from planner import CollisionChecker, Planner, RobotModel, time_parameterise
+from planner import (
+    COLLISION_TOLERANCE, IK_DAMPING, RRT_EDGE_STEP, RRT_MAX_ITERS, RRT_STEP,
+    CollisionChecker, Planner, RobotModel, time_parameterise,
+)
 
 # RoboCasa/robosuite print banners to stdout at import time, which would corrupt
 # the JSON-RPC channel. Keep a private handle on the real stdout for protocol
@@ -1287,6 +1290,40 @@ class Sim:
         value["preview"] = self.preview_mode
         return value
 
+    def _stack(self) -> dict:
+        """What the plugin is actually using, for the UI to display."""
+        return {
+            "vision": {
+                "model": self.detector_id,
+                "threshold": self.detector_threshold,
+                "method": "open-vocabulary detection + depth back-projection",
+            },
+            "kinematics": {
+                "forward": "mj_forward (site_xpos / site_xmat)",
+                "jacobian": "mj_jacSite",
+                "ik": "damped least squares",
+                "damping": IK_DAMPING,
+                "multi_start": 24,
+                "limit_margin_rad": 0.10,
+            },
+            "control": {"type": "JOINT_POSITION absolute", "kp": ARM_KP},
+            "planning": {
+                "planner": "RRT-Connect",
+                "collision": "contact scan",
+                "collision_tolerance_m": COLLISION_TOLERANCE,
+                "step_rad": RRT_STEP,
+                "edge_step_rad": RRT_EDGE_STEP,
+                "max_iters": RRT_MAX_ITERS,
+            },
+            "cameras": {
+                "current": self.camera,
+                "available": [
+                    "robot0_agentview_left", "robot0_agentview_right", "robot0_agentview_center",
+                    "robot0_eye_in_hand", "robot0_frontview", "robot0_robotview",
+                ],
+            },
+        }
+
     def status(self, p):
         env = self._require_env()
         oracle = self.perception != "sensors"
@@ -1302,6 +1339,7 @@ class Sim:
             "success": self._success(),
             "evaluation_only": {"success": True},
             "holding": self._holding(),
+            "stack": self._stack(),
         }
         if oracle:
             value["objects"] = _object_positions(env)

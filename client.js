@@ -20,6 +20,14 @@ window.__ModuleLoader__.load({
         threshold: '检测阈值',
         previewEvery: '预览刷新',
         settingsHint: '默认相机在下次打开场景时生效，其余立即生效',
+        stack: '技术栈',
+        stackVision: '视觉',
+        stackKinematics: '运动学',
+        stackControl: '控制',
+        stackPlanning: '规划',
+        stackCameras: '相机',
+        stackStarts: '起点',
+        stackThreshold: '阈值',
         workers: '运行中的仿真',
         noWorkers: '没有运行中的 worker 进程',
         current: '当前',
@@ -47,6 +55,14 @@ window.__ModuleLoader__.load({
         threshold: 'Detector threshold',
         previewEvery: 'Preview interval',
         settingsHint: 'the camera applies on the next open; everything else applies immediately',
+        stack: 'Stack',
+        stackVision: 'Vision',
+        stackKinematics: 'Kinematics',
+        stackControl: 'Control',
+        stackPlanning: 'Planning',
+        stackCameras: 'Cameras',
+        stackStarts: 'starts',
+        stackThreshold: 'threshold',
         workers: 'Running simulations',
         noWorkers: 'no worker process is running',
         current: 'current',
@@ -345,6 +361,28 @@ window.__ModuleLoader__.load({
             ),
 
         error ? h('div', { style: { fontSize: 12, color: '#d9534f' } }, error) : null,
+
+        state && state.stack
+          ? h(
+              'div',
+              { style: { display: 'flex', flexDirection: 'column', gap: 3, marginTop: 4 } },
+              h('div', { style: { fontSize: 12, opacity: 0.6, letterSpacing: '0.04em' } }, t('stack')),
+              ...[
+                [t('stackVision'), `${state.stack.vision.model} · ${t('stackThreshold')} ${state.stack.vision.threshold}`],
+                [t('stackKinematics'), `DLS λ=${state.stack.kinematics.damping} · ${state.stack.kinematics.multi_start} ${t('stackStarts')} · margin ${state.stack.kinematics.limit_margin_rad}`],
+                [t('stackControl'), `${state.stack.control.type} · kp=${state.stack.control.kp}`],
+                [t('stackPlanning'), `${state.stack.planning.planner} · step ${state.stack.planning.step_rad} · ${state.stack.planning.collision_tolerance_m * 1000} mm`],
+                [t('stackCameras'), `${state.stack.cameras.current} (${state.stack.cameras.available.length})`],
+              ].map(([label, value]) =>
+                h(
+                  'div',
+                  { key: label, style: { display: 'flex', gap: 8, fontSize: 11, fontFamily: MONO } },
+                  h('span', { style: { opacity: 0.65, minWidth: 64 } }, label),
+                  h('span', { style: { opacity: 0.9 } }, value),
+                ),
+              ),
+            )
+          : null,
 
         h(
           'div',
